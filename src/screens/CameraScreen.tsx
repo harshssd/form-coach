@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, LayoutChangeEvent } from 'react-native';
+import { View, Text, StyleSheet, LayoutChangeEvent, Pressable } from 'react-native';
 import {
   Camera,
+  type CameraDevice,
   useFrameProcessor,
-  useCameraDevice,
+  useCameraDevices,
   useCameraPermission,
   VisionCameraProxy,
 } from 'react-native-vision-camera';
@@ -28,9 +29,26 @@ type PoseFrame = {
 
 export default function CameraScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const backDevice = useCameraDevice('back');
-  const frontDevice = useCameraDevice('front');
-  const device = backDevice ?? frontDevice;
+  const devices = useCameraDevices();
+  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
+  const allDevices = useMemo(() => {
+    const deviceValues = devices ? Object.values(devices) : [];
+    return (deviceValues as (CameraDevice | undefined)[]).filter(
+      (d): d is CameraDevice => d != null,
+    );
+  }, [devices]);
+  const backDevice = useMemo(
+    () => allDevices.find((d) => d.position === 'back') ?? allDevices.find((d) => d.position !== 'front'),
+    [allDevices],
+  );
+  const frontDevice = useMemo(
+    () => allDevices.find((d) => d.position === 'front') ?? backDevice ?? allDevices[0],
+    [allDevices, backDevice],
+  );
+  const device =
+    cameraPosition === 'back'
+      ? backDevice ?? frontDevice ?? null
+      : frontDevice ?? backDevice ?? null;
 
   const [viewWidth, setViewWidth] = useState(0);
   const [viewHeight, setViewHeight] = useState(0);
@@ -52,6 +70,14 @@ export default function CameraScreen() {
       }
     })();
   }, [hasPermission, requestPermission]);
+
+  useEffect(() => {
+    if (cameraPosition === 'back' && !backDevice && frontDevice) {
+      setCameraPosition('front');
+    } else if (cameraPosition === 'front' && !frontDevice && backDevice) {
+      setCameraPosition('back');
+    }
+  }, [cameraPosition, backDevice, frontDevice]);
 
   useEffect(() => {
     console.log(
@@ -119,12 +145,15 @@ export default function CameraScreen() {
     }
   }, [setPoseFrameOnJS, setDebugOnJS]);
 
+  const actualPosition = device?.position === 'front' ? 'front' : 'back';
+  const displayMirrored = actualPosition === 'front';
+
   const keypoints = useMemo(() => {
     if (!poseFrame || !viewWidth || !viewHeight) {
       return [] as KP[];
     }
-    return transformPosePoints(poseFrame, viewWidth, viewHeight);
-  }, [poseFrame, viewWidth, viewHeight]);
+    return transformPosePoints(poseFrame, viewWidth, viewHeight, displayMirrored);
+  }, [poseFrame, viewWidth, viewHeight, displayMirrored]);
 
   useEffect(() => {
     setRep((prev) => updateSquatFSM(prev, keypoints));
@@ -135,19 +164,30 @@ export default function CameraScreen() {
   }
 
   if (!device) {
-    return <Centered label="No camera device found" />;
+    return (
+      <Centered
+        label={allDevices.length === 0 ? 'Loading camera devices…' : 'No camera device found'}
+      />
+    );
   }
 
   return (
     <View style={styles.container} onLayout={onLayout}>
-      <Camera
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive
-        frameProcessor={frameProcessor}
-        pixelFormat="yuv"
-      />
-      <PoseOverlay width={viewWidth} height={viewHeight} keypoints={keypoints} />
+      <View
+        style={[
+          StyleSheet.absoluteFill,
+          displayMirrored && styles.mirrored,
+        ]}
+      >
+        <Camera
+          style={StyleSheet.absoluteFill}
+          device={device!}
+          isActive
+          frameProcessor={frameProcessor}
+          pixelFormat="yuv"
+        />
+        <PoseOverlay width={viewWidth} height={viewHeight} keypoints={keypoints} />
+      </View>
       <View style={styles.overlay}>
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
         {debug ? <Text style={styles.debugText}>{debug}</Text> : null}
@@ -158,11 +198,46 @@ export default function CameraScreen() {
         <Text style={styles.hudLabel}>Form: {rep.score}</Text>
         <Text style={styles.hudState}>State: {rep.state}</Text>
       </View>
+      <View style={styles.toggleContainer}>
+        {([
+          { label: 'Back', value: 'back', available: !!backDevice },
+          { label: 'Front', value: 'front', available: !!frontDevice },
+        ] as const).map((option) => {
+          const active = cameraPosition === option.value && option.available;
+          return (
+            <Pressable
+              key={option.value}
+              onPress={() => option.available && setCameraPosition(option.value)}
+              style={[
+                styles.toggleButton,
+                active && styles.toggleButtonActive,
+                !option.available && styles.toggleButtonDisabled,
+              ]}
+              disabled={!option.available}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  active && styles.toggleTextActive,
+                  !option.available && styles.toggleTextDisabled,
+                ]}
+              >
+                {option.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
-function transformPosePoints(data: PoseFrame, viewWidth: number, viewHeight: number): KP[] {
+function transformPosePoints(
+  data: PoseFrame,
+  viewWidth: number,
+  viewHeight: number,
+  displayMirrored: boolean,
+): KP[] {
   const { width, height, orientation, isMirrored, points } = data;
   if (!width || !height || points.length === 0) {
     return [];
@@ -181,7 +256,8 @@ function transformPosePoints(data: PoseFrame, viewWidth: number, viewHeight: num
   const result: KP[] = [];
   for (const point of points) {
     let { x, y } = rotatePoint(point.x, point.y, width, height, normalizedOrientation);
-    if (isMirrored) {
+    const shouldMirror = displayMirrored ? !isMirrored : isMirrored;
+    if (shouldMirror) {
       x = rotatedWidth - x;
     }
 
@@ -266,16 +342,17 @@ function Centered({ label }: { label: string }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
+  mirrored: { transform: [{ scaleX: -1 }] },
   center: { alignItems: 'center', justifyContent: 'center' },
   centerText: { color: '#ffffff', fontSize: 16, fontWeight: '500' },
   overlay: {
     position: 'absolute',
     top: 40,
-    alignSelf: 'center',
-    padding: 8,
+    left: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     backgroundColor: '#00000080',
     borderRadius: 8,
-    alignItems: 'center',
   },
   overlayText: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   debugText: { color: '#ffffff', marginTop: 4, fontSize: 12 },
@@ -292,4 +369,26 @@ const styles = StyleSheet.create({
   hudLabel: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   hudCount: { color: '#ffffff', fontSize: 48, fontWeight: '800', lineHeight: 50 },
   hudState: { color: '#ffffff', marginTop: 4, fontSize: 14 },
+  toggleContainer: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  toggleButton: {
+    backgroundColor: '#00000080',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+  },
+  toggleButtonActive: {
+    backgroundColor: '#ffffff',
+  },
+  toggleButtonDisabled: {
+    backgroundColor: '#00000040',
+  },
+  toggleText: { color: '#ffffff', fontWeight: '700', letterSpacing: 0.5 },
+  toggleTextActive: { color: '#000000' },
+  toggleTextDisabled: { color: '#ffffff99' },
 });
