@@ -9,12 +9,8 @@ import {
 } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
 import Svg, { Circle } from 'react-native-svg';
-
-type Keypoint = {
-  x: number;
-  y: number;
-  name?: string;
-};
+import { KP } from '../pose/utils';
+import { initialRep, updateSquatFSM } from '../pose/squatCounter';
 
 type RawPoint = {
   x: number;
@@ -40,6 +36,7 @@ export default function CameraScreen() {
   const [viewHeight, setViewHeight] = useState(0);
   const [poseFrame, setPoseFrame] = useState<PoseFrame | null>(null);
   const [debug, setDebug] = useState<string | null>(null);
+  const [rep, setRep] = useState(initialRep);
 
   const setPoseFrameOnJS = useRunOnJS((data: PoseFrame | null) => {
     setPoseFrame(data);
@@ -103,25 +100,35 @@ export default function CameraScreen() {
       }
     }
 
-    setPoseFrameOnJS({
-      width,
-      height,
-      orientation,
-      isMirrored,
-      points: rawPoints,
-    });
+    if (rawPoints.length === 0) {
+      setPoseFrameOnJS(null);
+    } else {
+      setPoseFrameOnJS({
+        width,
+        height,
+        orientation,
+        isMirrored,
+        points: rawPoints,
+      });
+    }
 
-    setDebugOnJS(
-      `pts:${rawPoints.length} w:${width} h:${height} orient:${orientation} mirrored:${isMirrored}`,
-    );
+    if (output) {
+      setDebugOnJS(
+        `pts:${rawPoints.length} w:${width} h:${height} orient:${orientation} mirrored:${isMirrored}`,
+      );
+    }
   }, [setPoseFrameOnJS, setDebugOnJS]);
 
   const keypoints = useMemo(() => {
     if (!poseFrame || !viewWidth || !viewHeight) {
-      return [] as Keypoint[];
+      return [] as KP[];
     }
     return transformPosePoints(poseFrame, viewWidth, viewHeight);
   }, [poseFrame, viewWidth, viewHeight]);
+
+  useEffect(() => {
+    setRep((prev) => updateSquatFSM(prev, keypoints));
+  }, [keypoints]);
 
   if (!hasPermission) {
     return <Centered label="Requesting camera permission…" />;
@@ -145,11 +152,17 @@ export default function CameraScreen() {
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
         {debug ? <Text style={styles.debugText}>{debug}</Text> : null}
       </View>
+      <View style={styles.hud}>
+        <Text style={styles.hudLabel}>SQUATS</Text>
+        <Text style={styles.hudCount}>{rep.count}</Text>
+        <Text style={styles.hudLabel}>Form: {rep.score}</Text>
+        <Text style={styles.hudState}>State: {rep.state}</Text>
+      </View>
     </View>
   );
 }
 
-function transformPosePoints(data: PoseFrame, viewWidth: number, viewHeight: number): Keypoint[] {
+function transformPosePoints(data: PoseFrame, viewWidth: number, viewHeight: number): KP[] {
   const { width, height, orientation, isMirrored, points } = data;
   if (!width || !height || points.length === 0) {
     return [];
@@ -165,7 +178,7 @@ function transformPosePoints(data: PoseFrame, viewWidth: number, viewHeight: num
   const offsetX = (scaledWidth - viewWidth) / 2;
   const offsetY = (scaledHeight - viewHeight) / 2;
 
-  const result: Keypoint[] = [];
+  const result: KP[] = [];
   for (const point of points) {
     let { x, y } = rotatePoint(point.x, point.y, width, height, normalizedOrientation);
     if (isMirrored) {
@@ -222,7 +235,7 @@ function PoseOverlay({
 }: {
   width: number;
   height: number;
-  keypoints: Keypoint[];
+  keypoints: KP[];
 }) {
   if (!width || !height) {
     return null;
@@ -266,4 +279,17 @@ const styles = StyleSheet.create({
   },
   overlayText: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   debugText: { color: '#ffffff', marginTop: 4, fontSize: 12 },
+  hud: {
+    position: 'absolute',
+    bottom: 40,
+    alignSelf: 'center',
+    padding: 12,
+    backgroundColor: '#000000b0',
+    borderRadius: 12,
+    alignItems: 'center',
+    minWidth: 160,
+  },
+  hudLabel: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
+  hudCount: { color: '#ffffff', fontSize: 48, fontWeight: '800', lineHeight: 50 },
+  hudState: { color: '#ffffff', marginTop: 4, fontSize: 14 },
 });
