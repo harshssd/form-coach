@@ -3702,6 +3702,11 @@ expo-server@^1.0.1:
   resolved "https://registry.yarnpkg.com/expo-server/-/expo-server-1.0.1.tgz#9e04605310be090896a85aadce2cb7eaf6aae9b7"
   integrity sha512-J3JlpzNXOkkr4BbapTrcv6klBQcw6NzrBBVIU7qkNE2eU3U1on9rp27wi0+cihjG/QgxSIqQVkrga5z3HWnH0A==
 
+expo-speech@~14.0.7:
+  version "14.0.7"
+  resolved "https://registry.yarnpkg.com/expo-speech/-/expo-speech-14.0.7.tgz#be259723819a0a4471511307d27e51a9985c7dc2"
+  integrity sha512-Ff/seq4tfj6AnGZj8Mj83EGnHj636f2mO30bPr3qQJzF9zn3ArakuUQTK8UrkVy0OS0E12z28d+9Fe+AgSUB0w==
+
 expo-splash-screen@~31.0.10:
   version "31.0.10"
   resolved "https://registry.yarnpkg.com/expo-splash-screen/-/expo-splash-screen-31.0.10.tgz#e0edd9782715b82a8eed34d5ebde778b79f850b4"
