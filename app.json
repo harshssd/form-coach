@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "form-coach",
+    "name": "Form Coach",
     "slug": "form-coach",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,7 +9,12 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "bundleIdentifier": "com.harshssd.formcoach",
+      "deploymentTarget": "13.0",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Form Coach uses the camera to analyze your form during workouts."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +24,12 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.CAMERA"
+      ],
+      "package": "com.harshssd.formcoach"
     },
     "web": {
       "output": "static",
@@ -37,6 +47,12 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "Form Coach uses the camera to analyze your form during workouts."
         }
       ]
     ],
