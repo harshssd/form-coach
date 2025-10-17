@@ -22,12 +22,20 @@ import {
   usePoseStream,
   type PoseFramePayload,
 } from '../pose/usePoseStream';
-import { useSquatSession } from '../reps/useSquatSession';
+import {
+  useExerciseSession,
+  type Exercise,
+} from '../reps/useExerciseSession';
 import {
   addSession,
   listSessions,
   type SessionRecord,
 } from '../storage/sessionStore';
+import {
+  loadSettings,
+  saveSettings,
+  type ExerciseSettings,
+} from '../storage/settingsStore';
 import { last7DaysSummary, type DayBucket } from '../storage/selectors';
 import { say } from '../voice/tts';
 
@@ -66,6 +74,13 @@ export default function CameraScreen() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<SessionRecord[]>([]);
   const [weekly, setWeekly] = useState<DayBucket[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const [exercise, setExercise] = useState<Exercise>('squat');
+  const [settings, setSettings] = useState<ExerciseSettings>(() =>
+    loadSettings('squat'),
+  );
 
   const {
     session,
@@ -76,13 +91,23 @@ export default function CameraScreen() {
     resume: resumeSession,
     reset: resetSession,
     getSummary,
-  } = useSquatSession(keypoints, { onResetPoseStream: resetPoseStream });
+  } = useExerciseSession(keypoints, {
+    exercise,
+    settings,
+    onResetPoseStream: resetPoseStream,
+  });
 
   useEffect(() => {
     const list = listSessions();
     setHistory(list);
     setWeekly(last7DaysSummary(list));
   }, []);
+
+  useEffect(() => {
+    setSettings(loadSettings(exercise));
+  }, [exercise]);
+
+  const exercises: Exercise[] = ['squat', 'pushup'];
 
   const pushFrame = useRunOnJS(
     (payload: PoseFramePayload | null) => {
@@ -98,8 +123,9 @@ export default function CameraScreen() {
       `device=${device?.name ?? 'none'}`,
       `keypoints=${keypoints.length}`,
       `session=${session}`,
+      `exercise=${exercise}`,
     );
-  }, [hasPermission, device, keypoints.length, session]);
+  }, [hasPermission, device, keypoints.length, session, exercise]);
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -173,7 +199,7 @@ export default function CameraScreen() {
     const summary = getSummary();
     const record: SessionRecord = {
       id: `${summary.endedAt}`,
-      exercise: 'squat',
+      exercise,
       reps: summary.reps,
       avgForm: summary.avgForm,
       startedAt: summary.startedAt,
@@ -184,9 +210,11 @@ export default function CameraScreen() {
     const list = listSessions();
     setHistory(list);
     setWeekly(last7DaysSummary(list));
-    say('session saved');
+    if (settings.enableVoice) {
+      say('session saved');
+    }
     resetSession({ speak: false });
-  }, [session, getSummary, resetSession]);
+  }, [session, getSummary, resetSession, exercise, settings.enableVoice]);
 
   const openHistory = useCallback(() => {
     const list = listSessions();
@@ -215,14 +243,14 @@ export default function CameraScreen() {
           displayMirrored={displayMirrored}
           frameProcessor={frameProcessor}
           isActive
-        pixelFormat="yuv"
-      >
-        <PoseOverlay
-          width={viewWidth}
-          height={viewHeight}
-          keypoints={session === 'ACTIVE' ? keypoints : []}
-        />
-      </PoseCamera>
+          pixelFormat="yuv"
+        >
+          <PoseOverlay
+            width={viewWidth}
+            height={viewHeight}
+            keypoints={session === 'ACTIVE' ? keypoints : []}
+          />
+        </PoseCamera>
 
       <View style={styles.overlay}>
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
@@ -230,7 +258,8 @@ export default function CameraScreen() {
       </View>
 
       <View style={styles.hud}>
-        <Text style={styles.hudLabel}>SQUATS</Text>
+        <Text style={styles.hudExercise}>{exercise.toUpperCase()}</Text>
+        <Text style={styles.hudLabel}>REPS</Text>
         <Text style={styles.hudCount}>{rep.count}</Text>
         <Text style={styles.hudLabel}>Form: {rep.score}</Text>
         <Text style={styles.hudState}>
@@ -249,6 +278,18 @@ export default function CameraScreen() {
             <Btn label="End & Save" onPress={endAndSave} />
           )}
           <Btn label="History" onPress={openHistory} />
+          <Btn
+            label="Exercise"
+            onPress={() => setPickerOpen(true)}
+            disabled={session === 'ACTIVE'}
+          />
+          <Btn
+            label="Settings"
+            onPress={() => {
+              setSettings(loadSettings(exercise));
+              setSettingsOpen(true);
+            }}
+          />
           <Btn
             label={cameraPosition === 'back' ? 'Front' : 'Back'}
             onPress={() => canSwitchCamera && setCameraPosition(nextCameraPosition)}
@@ -271,11 +312,15 @@ export default function CameraScreen() {
                 <Text style={styles.btnText}>Close</Text>
               </Pressable>
             </View>
-            {weekly.length > 0 && <WeeklyChart data={weekly} />}
-            <View style={styles.legendRow}>
-              <Text style={styles.legendText}>Bars: Reps</Text>
-              <Text style={styles.legendText}>Tick: Avg form</Text>
-            </View>
+            {weekly.length > 0 && (
+              <>
+                <WeeklyChart data={weekly} />
+                <View style={styles.legendRow}>
+                  <Text style={styles.legendText}>Bars: Reps</Text>
+                  <Text style={styles.legendText}>Tick: Avg form</Text>
+                </View>
+              </>
+            )}
             <FlatList
               data={history}
               keyExtractor={(item) => item.id}
@@ -293,6 +338,143 @@ export default function CameraScreen() {
                 <Text style={styles.historyEmpty}>No sessions yet.</Text>
               }
             />
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={settingsOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSettingsOpen(false)}
+      >
+        <View style={styles.modalWrap}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{exercise.toUpperCase()} Settings</Text>
+              <Pressable
+                style={styles.modalClose}
+                onPress={() => setSettingsOpen(false)}
+              >
+                <Text style={styles.btnText}>Close</Text>
+              </Pressable>
+            </View>
+
+            <View style={{ marginVertical: 10 }}>
+              <Text style={styles.settingLabel}>Depth threshold (°)</Text>
+              <View style={styles.settingStepper}>
+                <Pressable
+                  style={styles.stepBtn}
+                  onPress={() =>
+                    setSettings((s) => ({
+                      ...s,
+                      depthThreshold: Math.max(40, s.depthThreshold - 5),
+                    }))
+                  }
+                >
+                  <Text style={styles.btnText}>−</Text>
+                </Pressable>
+                <Text style={styles.stepValue}>{settings.depthThreshold}</Text>
+                <Pressable
+                  style={styles.stepBtn}
+                  onPress={() =>
+                    setSettings((s) => ({
+                      ...s,
+                      depthThreshold: Math.min(170, s.depthThreshold + 5),
+                    }))
+                  }
+                >
+                  <Text style={styles.btnText}>+</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            <View style={{ marginVertical: 10 }}>
+              <Pressable
+                style={styles.toggleRow}
+                onPress={() =>
+                  setSettings((s) => ({
+                    ...s,
+                    enableVoice: !s.enableVoice,
+                  }))
+                }
+              >
+                <Text style={styles.toggleText}>Voice cues</Text>
+                <Text style={styles.toggleText}>
+                  {settings.enableVoice ? 'ON' : 'OFF'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={styles.toggleRow}
+                onPress={() =>
+                  setSettings((s) => ({
+                    ...s,
+                    enableTechniqueCues: !s.enableTechniqueCues,
+                  }))
+                }
+              >
+                <Text style={styles.toggleText}>Technique cues</Text>
+                <Text style={styles.toggleText}>
+                  {settings.enableTechniqueCues ? 'ON' : 'OFF'}
+                </Text>
+              </Pressable>
+            </View>
+
+            <Pressable
+              style={[styles.modalClose, { alignSelf: 'center', marginTop: 20 }]}
+              onPress={() => {
+                const payload: ExerciseSettings = {
+                  ...settings,
+                  name: exercise,
+                };
+                saveSettings(payload);
+                if (settings.enableVoice) {
+                  say('settings saved');
+                }
+                setSettings(payload);
+                setSettingsOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>Save Settings</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={pickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        <View style={styles.modalWrap}>
+          <View style={[styles.modalCard, { paddingBottom: 24 }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Choose Exercise</Text>
+              <Pressable
+                style={styles.modalClose}
+                onPress={() => setPickerOpen(false)}
+              >
+                <Text style={styles.btnText}>Close</Text>
+              </Pressable>
+            </View>
+
+            {exercises.map((item) => {
+              const active = item === exercise;
+              return (
+                <Pressable
+                  key={item}
+                  style={[styles.pickerRow, active && styles.pickerRowActive]}
+                  onPress={() => {
+                    setExercise(item);
+                    setSettings(loadSettings(item));
+                    setPickerOpen(false);
+                  }}
+                >
+                  <Text style={styles.pickerText}>{item.toUpperCase()}</Text>
+                </Pressable>
+              );
+            })}
           </View>
         </View>
       </Modal>
@@ -477,6 +659,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     minWidth: 160,
   },
+  hudExercise: {
+    color: '#ffffff',
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
   hudLabel: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   hudCount: { color: '#ffffff', fontSize: 48, fontWeight: '800', lineHeight: 50 },
   hudState: { color: '#ffffff', marginTop: 4, fontSize: 14 },
@@ -544,8 +732,45 @@ const styles = StyleSheet.create({
   legendRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    columnGap: 16,
+    gap: 16,
     marginBottom: 8,
   },
   legendText: { color: '#ffffff', opacity: 0.75, fontSize: 12 },
+  settingLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
+  settingStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    gap: 12,
+  },
+  stepBtn: {
+    backgroundColor: '#222',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  stepValue: { color: '#ffffff', width: 50, textAlign: 'center' },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginVertical: 8,
+  },
+  toggleText: { color: '#ffffff', fontSize: 15, fontWeight: '600' },
+  pickerRow: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#222',
+    marginBottom: 10,
+    backgroundColor: '#1a1a1a',
+  },
+  pickerRowActive: {
+    borderColor: '#3FA9F5',
+    backgroundColor: '#1f2a36',
+  },
+  pickerText: { color: '#ffffff', fontWeight: '700', textAlign: 'center' },
 });

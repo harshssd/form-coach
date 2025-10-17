@@ -2,7 +2,7 @@ import { MMKV } from 'react-native-mmkv';
 
 export type SessionRecord = {
   id: string;
-  exercise: 'squat';
+  exercise: 'squat' | 'pushup';
   reps: number;
   avgForm: number;
   startedAt: number;

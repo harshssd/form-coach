@@ -1,4 +1,4 @@
-import { KP, byName, angleDeg } from './utils';
+import { KP, byName, angleDeg } from '../pose/utils';
 
 export type RepState = 'TOP' | 'DESCENDING' | 'BOTTOM' | 'ASCENDING';
 
@@ -6,54 +6,64 @@ export type RepUpdate = {
   count: number;
   state: RepState;
   score: number;
-  kneeAngle: number;
+  elbowAngle: number;
   bottomHold: number;
   topHold: number;
-  lastCueAt: number;
 };
 
 export const initialRep: RepUpdate = {
   count: 0,
   state: 'TOP',
   score: 100,
-  kneeAngle: 180,
+  elbowAngle: 180,
   bottomHold: 0,
   topHold: 2,
-  lastCueAt: 0,
 };
 
 const ENTER_TOP_ANGLE = 160;
 const EXIT_TOP_ANGLE = 140;
 const HOLD_FRAMES = 2;
 
-export function updateSquatFSM(
+function bodyLinePenalty(map: Record<string, KP>): number {
+  const shoulder = map['leftShoulder'] ?? map['rightShoulder'];
+  const hip = map['leftHip'] ?? map['rightHip'];
+  const ankle = map['leftAnkle'] ?? map['rightAnkle'];
+  if (!shoulder || !hip || !ankle) {
+    return 0;
+  }
+  const angle = angleDeg(shoulder, hip, ankle);
+  return Math.max(0, (165 - Math.min(180, angle)) / 30);
+}
+
+export function updatePushupFSM(
   prev: RepUpdate,
   kps: KP[],
-  depthThreshold = 85,
+  depthThreshold = 70,
 ): RepUpdate {
-  const m = byName(kps);
-  const lk = m['leftKnee'];
-  const rk = m['rightKnee'];
-  const lh = m['leftHip'];
-  const rh = m['rightHip'];
-  const la = m['leftAnkle'];
-  const ra = m['rightAnkle'];
-  if (!lk || !rk || !lh || !rh || !la || !ra) {
+  const map = byName(kps);
+  const ls = map['leftShoulder'] ?? map['rightShoulder'];
+  const rs = map['rightShoulder'] ?? map['leftShoulder'];
+  const le = map['leftElbow'];
+  const re = map['rightElbow'];
+  const lw = map['leftWrist'];
+  const rw = map['rightWrist'];
+
+  if (!le || !re || !lw || !rw || !ls || !rs) {
     return prev;
   }
 
-  const lKnee = angleDeg(lh, lk, la);
-  const rKnee = angleDeg(rh, rk, ra);
-  const knee = Math.min(lKnee, rKnee);
+  const leftElbow = angleDeg(ls, le, lw);
+  const rightElbow = angleDeg(rs, re, rw);
+  const elbow = Math.min(leftElbow, rightElbow);
 
   let { count, state, bottomHold, topHold } = prev;
 
   const enterBottom = depthThreshold;
-  const exitBottom = Math.min(depthThreshold + 30, 150);
+  const exitBottom = Math.min(depthThreshold + 25, 130);
 
   switch (state) {
     case 'TOP':
-      if (knee < EXIT_TOP_ANGLE) {
+      if (elbow < EXIT_TOP_ANGLE) {
         state = 'DESCENDING';
       }
       topHold = Math.min(HOLD_FRAMES, topHold + 1);
@@ -61,7 +71,7 @@ export function updateSquatFSM(
       break;
 
     case 'DESCENDING':
-      if (knee < enterBottom) {
+      if (elbow < enterBottom) {
         bottomHold += 1;
         if (bottomHold >= HOLD_FRAMES) {
           state = 'BOTTOM';
@@ -70,14 +80,14 @@ export function updateSquatFSM(
       } else {
         bottomHold = 0;
       }
-      if (knee > ENTER_TOP_ANGLE) {
+      if (elbow > ENTER_TOP_ANGLE) {
         state = 'TOP';
       }
       topHold = 0;
       break;
 
     case 'BOTTOM':
-      if (knee > exitBottom) {
+      if (elbow > exitBottom) {
         state = 'ASCENDING';
       }
       bottomHold = Math.min(HOLD_FRAMES, bottomHold + 1);
@@ -85,7 +95,7 @@ export function updateSquatFSM(
       break;
 
     case 'ASCENDING':
-      if (knee > ENTER_TOP_ANGLE) {
+      if (elbow > ENTER_TOP_ANGLE) {
         topHold += 1;
         if (topHold >= HOLD_FRAMES) {
           state = 'TOP';
@@ -99,23 +109,17 @@ export function updateSquatFSM(
       break;
   }
 
-  const valgusLeft = Math.max(0, la.x - lk.x);
-  const valgusRight = Math.max(0, ra.x - rk.x);
-  const kneeValgus = valgusLeft + valgusRight;
-  const depth = Math.max(0, Math.min(1, (160 - Math.min(knee, 160)) / 85));
-
-  let score = Math.round(
-    100 - 40 * Math.max(0, 0.1 - kneeValgus) * 10 + 12 * depth,
-  );
+  const depth = Math.max(0, Math.min(1, (160 - Math.min(elbow, 160)) / 90));
+  const linePenalty = bodyLinePenalty(map);
+  let score = Math.round(90 * depth + 10) - Math.round(25 * linePenalty);
   score = Math.max(1, Math.min(100, score));
 
   return {
     count,
     state,
     score,
-    kneeAngle: knee,
+    elbowAngle: elbow,
     bottomHold,
     topHold,
-    lastCueAt: prev.lastCueAt,
   };
 }
