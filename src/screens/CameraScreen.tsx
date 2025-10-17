@@ -12,133 +12,76 @@ import {
   LayoutChangeEvent,
   Pressable,
 } from 'react-native';
-import {
-  Camera,
-  type CameraDevice,
-  useCameraDevices,
-  useCameraPermission,
-  useFrameProcessor,
-  VisionCameraProxy,
-} from 'react-native-vision-camera';
+import { useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
 import Svg, { Circle } from 'react-native-svg';
 import { KP } from '../pose/utils';
-import { initialRep, updateSquatFSM } from '../pose/squatCounter';
-import { say } from '../voice/tts';
+import { PoseCamera } from '../camera/PoseCamera';
+import { useCameraSelection } from '../camera/useCameraSelection';
+import {
+  usePoseStream,
+  type PoseFramePayload,
+} from '../pose/usePoseStream';
+import { useSquatSession } from '../reps/useSquatSession';
 
 type RawPoint = {
   x: number;
   y: number;
+  score?: number;
   name?: string;
 };
 
-type PoseFrame = {
-  width: number;
-  height: number;
-  orientation: number;
-  isMirrored: boolean;
-  points: RawPoint[];
-};
-
-type SessionState = 'IDLE' | 'ACTIVE' | 'PAUSED';
-
 export default function CameraScreen() {
-  const { hasPermission, requestPermission } = useCameraPermission();
-  const devices = useCameraDevices();
-  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
-
-  const allDevices = useMemo(() => {
-    const values = devices ? Object.values(devices) : [];
-    return (values as (CameraDevice | undefined)[]).filter(
-      (d): d is CameraDevice => d != null,
-    );
-  }, [devices]);
-
-  const backDevice = useMemo(
-    () =>
-      allDevices.find((d) => d.position === 'back') ??
-      allDevices.find((d) => d.position !== 'front'),
-    [allDevices],
-  );
-  const frontDevice = useMemo(
-    () =>
-      allDevices.find((d) => d.position === 'front') ??
-      backDevice ??
-      allDevices[0],
-    [allDevices, backDevice],
-  );
-
-  const device =
-    cameraPosition === 'back'
-      ? backDevice ?? frontDevice ?? null
-      : frontDevice ?? backDevice ?? null;
+  const {
+    hasPermission,
+    device,
+    displayMirrored,
+    cameraPosition,
+    setCameraPosition,
+    availablePositions,
+    statusMessage,
+  } = useCameraSelection('back');
 
   const [viewWidth, setViewWidth] = useState(0);
   const [viewHeight, setViewHeight] = useState(0);
-  const [poseFrame, setPoseFrame] = useState<PoseFrame | null>(null);
-  const [debug, setDebug] = useState<string | null>(null);
-  const [rep, setRep] = useState(initialRep);
-  const [session, setSession] = useState<SessionState>('IDLE');
-  const [elapsed, setElapsed] = useState(0);
 
-  const sessionStartRef = useRef<number | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const lastStateRef = useRef(rep.state);
-  const lastCountRef = useRef(rep.count);
+  const {
+    keypoints,
+    debug,
+    handleFrame,
+    reset: resetPoseStream,
+  } = usePoseStream({
+    viewWidth,
+    viewHeight,
+    displayMirrored,
+  });
 
-  const setPoseFrameOnJS = useRunOnJS((data: PoseFrame | null) => {
-    setPoseFrame(data);
-  }, []);
-  const setDebugOnJS = useRunOnJS((value: string) => {
-    setDebug(value);
-  }, []);
+  const {
+    session,
+    rep,
+    elapsed,
+    start: startSession,
+    pause: pauseSession,
+    resume: resumeSession,
+    reset: resetSession,
+  } = useSquatSession(keypoints, { onResetPoseStream: resetPoseStream });
 
-  useEffect(() => {
-    (async () => {
-      if (!hasPermission) {
-        await requestPermission();
-      }
-    })();
-  }, [hasPermission, requestPermission]);
-
-  useEffect(() => {
-    if (cameraPosition === 'back' && !backDevice && frontDevice) {
-      setCameraPosition('front');
-    } else if (cameraPosition === 'front' && !frontDevice && backDevice) {
-      setCameraPosition('back');
-    }
-  }, [cameraPosition, backDevice, frontDevice]);
+  const pushFrame = useRunOnJS(
+    (payload: PoseFramePayload | null) => {
+      handleFrame(payload);
+    },
+    [handleFrame],
+  );
 
   useEffect(() => {
     console.log(
       '[CameraScreen]',
       `hasPermission=${hasPermission}`,
       `device=${device?.name ?? 'none'}`,
-      `posePoints=${poseFrame?.points.length ?? 0}`,
-      `orientation=${poseFrame?.orientation ?? 'n/a'}`,
+      `keypoints=${keypoints.length}`,
       `session=${session}`,
     );
-  }, [hasPermission, device, poseFrame, session]);
-
-  useEffect(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    if (session === 'ACTIVE') {
-      timerRef.current = setInterval(() => {
-        if (sessionStartRef.current != null) {
-          setElapsed(Date.now() - sessionStartRef.current);
-        }
-      }, 200);
-    }
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-  }, [session]);
+  }, [hasPermission, device, keypoints.length, session]);
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -163,7 +106,7 @@ export default function CameraScreen() {
     const output = plugin.call(frame, {
       mode: 'stream',
       performanceMode: 'max',
-    }) as Record<string, { x: number; y: number }> | null | undefined;
+    }) as Record<string, { x: number; y: number; score?: number }> | null;
 
     const width = frame.width ?? 0;
     const height = frame.height ?? 0;
@@ -174,145 +117,60 @@ export default function CameraScreen() {
     if (output) {
       for (const name in output) {
         const value = output[name];
-        if (value && typeof value.x === 'number' && typeof value.y === 'number') {
-          rawPoints.push({ name, x: value.x, y: value.y });
-        }
+        if (!value) continue;
+        rawPoints.push({
+          name,
+          x: value.x,
+          y: value.y,
+          score: value.score,
+        });
       }
     }
 
     if (rawPoints.length === 0) {
-      setPoseFrameOnJS(null);
+      pushFrame(null);
     } else {
-      setPoseFrameOnJS({
+      const payload: PoseFramePayload = {
         width,
         height,
         orientation,
         isMirrored,
         points: rawPoints,
-      });
+      };
+      pushFrame(payload);
     }
-
-    if (output) {
-      setDebugOnJS(
-        `pts:${rawPoints.length} w:${width} h:${height} orient:${orientation} mirrored:${isMirrored}`,
-      );
-    }
-  }, [setPoseFrameOnJS, setDebugOnJS]);
-
-  const actualPosition = device?.position === 'front' ? 'front' : 'back';
-  const displayMirrored = actualPosition === 'front';
-
-  const keypoints = useMemo(() => {
-    if (!poseFrame || !viewWidth || !viewHeight) {
-      return [] as KP[];
-    }
-    return transformPosePoints(poseFrame, viewWidth, viewHeight, displayMirrored);
-  }, [poseFrame, viewWidth, viewHeight, displayMirrored]);
-
-  useEffect(() => {
-    if (session !== 'ACTIVE') {
-      return;
-    }
-    setRep((prev) => {
-      const next = updateSquatFSM(prev, keypoints);
-
-      if (next.state !== lastStateRef.current) {
-        if (next.state === 'BOTTOM') {
-          say('down');
-        } else if (next.state === 'TOP' && next.count > prev.count) {
-          say('up');
-        }
-        lastStateRef.current = next.state;
-      }
-
-      if (next.count !== lastCountRef.current) {
-        if (next.score >= 90) {
-          say('nice depth', 500);
-        }
-        lastCountRef.current = next.count;
-      }
-
-      if (next.score < 70) {
-        say('knees out');
-      }
-
-      return next;
-    });
-  }, [keypoints, session]);
-
-  const start = useCallback(() => {
-    setRep(initialRep);
-    lastStateRef.current = initialRep.state;
-    lastCountRef.current = initialRep.count;
-    sessionStartRef.current = Date.now();
-    setElapsed(0);
-    setSession('ACTIVE');
-    say('session started');
-  }, []);
-
-  const pause = useCallback(() => {
-    if (sessionStartRef.current != null) {
-      setElapsed(Date.now() - sessionStartRef.current);
-    }
-    setSession('PAUSED');
-    say('paused');
-  }, []);
-
-  const resume = useCallback(() => {
-    if (sessionStartRef.current != null) {
-      sessionStartRef.current = Date.now() - elapsed;
-    } else {
-      sessionStartRef.current = Date.now() - elapsed;
-    }
-    setSession('ACTIVE');
-    say('resumed');
-  }, [elapsed]);
-
-  const reset = useCallback(() => {
-    setSession('IDLE');
-    setElapsed(0);
-    sessionStartRef.current = null;
-    setRep(initialRep);
-    lastStateRef.current = initialRep.state;
-    lastCountRef.current = initialRep.count;
-    say('reset');
-  }, []);
+  }, [pushFrame]);
 
   if (!hasPermission) {
     return <Centered label="Requesting camera permission…" />;
   }
 
+  const nextCameraPosition = cameraPosition === 'back' ? 'front' : 'back';
+  const canSwitchCamera = availablePositions[nextCameraPosition];
+
   if (!device) {
     return (
       <Centered
-        label={
-          allDevices.length === 0 ? 'Loading camera devices…' : 'No camera device found'
-        }
+        label={statusMessage ?? 'No camera device found'}
       />
     );
   }
 
   return (
     <View style={styles.container} onLayout={onLayout}>
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          displayMirrored && styles.mirrored,
-        ]}
+      <PoseCamera
+        device={device}
+        displayMirrored={displayMirrored}
+        frameProcessor={frameProcessor}
+        isActive
+        pixelFormat="yuv"
       >
-        <Camera
-          style={StyleSheet.absoluteFill}
-          device={device}
-          isActive
-          frameProcessor={frameProcessor}
-          pixelFormat="yuv"
-        />
         <PoseOverlay
           width={viewWidth}
           height={viewHeight}
           keypoints={session === 'ACTIVE' ? keypoints : []}
         />
-      </View>
+      </PoseCamera>
 
       <View style={styles.overlay}>
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
@@ -329,17 +187,16 @@ export default function CameraScreen() {
       </View>
 
       <View style={styles.controls}>
-        {session === 'IDLE' && <Btn label="Start" onPress={start} />}
-        {session === 'ACTIVE' && <Btn label="Pause" onPress={pause} />}
-        {session === 'PAUSED' && <Btn label="Resume" onPress={resume} />}
+        {session === 'IDLE' && <Btn label="Start" onPress={startSession} />}
+        {session === 'ACTIVE' && <Btn label="Pause" onPress={pauseSession} />}
+        {session === 'PAUSED' && <Btn label="Resume" onPress={resumeSession} />}
         {(session === 'ACTIVE' || session === 'PAUSED') && (
-          <Btn label="Reset" onPress={reset} />
+          <Btn label="Reset" onPress={resetSession} />
         )}
         <Btn
           label={cameraPosition === 'back' ? 'Front' : 'Back'}
-          onPress={() =>
-            setCameraPosition((pos) => (pos === 'back' ? 'front' : 'back'))
-          }
+          onPress={() => canSwitchCamera && setCameraPosition(nextCameraPosition)}
+          disabled={!canSwitchCamera}
         />
       </View>
     </View>
@@ -386,6 +243,7 @@ function transformPosePoints(
         name: point.name,
         x: clamp01(normX),
         y: clamp01(normY),
+        score: point.score,
       });
     }
   }
@@ -455,17 +313,29 @@ function Centered({ label }: { label: string }) {
   );
 }
 
-function Btn({ label, onPress }: { label: string; onPress: () => void }) {
+function Btn({
+  label,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <Pressable onPress={onPress} style={styles.btn}>
-      <Text style={styles.btnText}>{label}</Text>
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      style={[styles.btn, disabled && styles.btnDisabled]}
+    >
+      <Text style={[styles.btnText, disabled && styles.btnTextDisabled]}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  mirrored: { transform: [{ scaleX: -1 }] },
   center: { alignItems: 'center', justifyContent: 'center' },
   centerText: { color: '#ffffff', fontSize: 16, fontWeight: '500' },
   overlay: {
@@ -507,5 +377,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#3a3a3a',
   },
+  btnDisabled: {
+    backgroundColor: '#1f1f1f80',
+    borderColor: '#3a3a3a80',
+  },
   btnText: { color: '#ffffff', fontWeight: '700' },
+  btnTextDisabled: { color: '#ffffff60' },
 });
