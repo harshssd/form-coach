@@ -36,7 +36,13 @@ import {
   saveSettings,
   type ExerciseSettings,
 } from '../storage/settingsStore';
-import { last7DaysSummary, type DayBucket } from '../storage/selectors';
+import {
+  last7DaysSummary,
+  todayTotals,
+  weekTotals,
+  currentStreak,
+  type DayBucket,
+} from '../storage/selectors';
 import { say } from '../voice/tts';
 
 type RawPoint = {
@@ -76,6 +82,12 @@ export default function CameraScreen() {
   const [weekly, setWeekly] = useState<DayBucket[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [dashOpen, setDashOpen] = useState(false);
+  const [dash, setDash] = useState<{
+    today: ReturnType<typeof todayTotals>;
+    week: ReturnType<typeof weekTotals>;
+    streak: number;
+  } | null>(null);
 
   const [exercise, setExercise] = useState<Exercise>('squat');
   const [settings, setSettings] = useState<ExerciseSettings>(() =>
@@ -227,6 +239,20 @@ export default function CameraScreen() {
     setHistoryOpen(false);
   }, []);
 
+  const openDashboard = useCallback(() => {
+    const list = listSessions();
+    setDash({
+      today: todayTotals(list),
+      week: weekTotals(list),
+      streak: currentStreak(list),
+    });
+    setDashOpen(true);
+  }, []);
+
+  const closeDashboard = useCallback(() => {
+    setDashOpen(false);
+  }, []);
+
   if (!device) {
     return (
       <Centered
@@ -267,7 +293,7 @@ export default function CameraScreen() {
         </Text>
       </View>
 
-        <View style={styles.controls}>
+        <View style={styles.controlsSection}>
           {session === 'IDLE' && <Btn label="Start" onPress={startSession} />}
           {session === 'ACTIVE' && <Btn label="Pause" onPress={pauseSession} />}
           {session === 'PAUSED' && <Btn label="Resume" onPress={resumeSession} />}
@@ -277,7 +303,15 @@ export default function CameraScreen() {
           {session === 'PAUSED' && (
             <Btn label="End & Save" onPress={endAndSave} />
           )}
+          <Btn
+            label={cameraPosition === 'back' ? 'Front' : 'Back'}
+            onPress={() =>
+              canSwitchCamera && setCameraPosition(nextCameraPosition)
+            }
+            disabled={!canSwitchCamera}
+          />
           <Btn label="History" onPress={openHistory} />
+          <Btn label="Dashboard" onPress={openDashboard} />
           <Btn
             label="Exercise"
             onPress={() => setPickerOpen(true)}
@@ -289,11 +323,6 @@ export default function CameraScreen() {
               setSettings(loadSettings(exercise));
               setSettingsOpen(true);
             }}
-          />
-          <Btn
-            label={cameraPosition === 'back' ? 'Front' : 'Back'}
-            onPress={() => canSwitchCamera && setCameraPosition(nextCameraPosition)}
-            disabled={!canSwitchCamera}
           />
         </View>
       </View>
@@ -475,6 +504,71 @@ export default function CameraScreen() {
                 </Pressable>
               );
             })}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={dashOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={closeDashboard}
+      >
+        <View style={styles.modalWrap}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Dashboard</Text>
+              <Pressable
+                style={styles.modalClose}
+                onPress={closeDashboard}
+              >
+                <Text style={styles.btnText}>Close</Text>
+              </Pressable>
+            </View>
+
+            {dash && (
+              <View>
+                <View style={styles.dashboardRow}>
+                  <View style={styles.card}>
+                    <Text style={styles.cardH}>Today</Text>
+                    <Text style={styles.cardBig}>{dash.today.reps}</Text>
+                    <Text style={styles.cardS}>
+                      {dash.today.sessions} session
+                      {dash.today.sessions === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                  <View style={styles.card}>
+                    <Text style={styles.cardH}>7-Day</Text>
+                    <Text style={styles.cardBig}>{dash.week.reps}</Text>
+                    <Text style={styles.cardS}>
+                      {dash.week.sessions} session
+                      {dash.week.sessions === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                  <View style={styles.card}>
+                    <Text style={styles.cardH}>Streak</Text>
+                    <Text style={styles.cardBig}>{dash.streak}d</Text>
+                    <Text style={styles.cardS}>consecutive days</Text>
+                  </View>
+                </View>
+
+                <View style={{ marginTop: 16 }}>
+                  <Text style={styles.modalTitle}>Today</Text>
+                  {Object.keys(dash.today.perExercise).length === 0 ? (
+                    <Text style={styles.historyEmpty}>
+                      No work logged today.
+                    </Text>
+                  ) : (
+                    Object.entries(dash.today.perExercise).map(([key, value]) => (
+                      <View key={key} style={styles.row}>
+                        <Text style={styles.rowT}>{key.toUpperCase()}</Text>
+                        <Text style={styles.rowS}>{value} reps</Text>
+                      </View>
+                    ))
+                  )}
+                </View>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -668,12 +762,15 @@ const styles = StyleSheet.create({
   hudLabel: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   hudCount: { color: '#ffffff', fontSize: 48, fontWeight: '800', lineHeight: 50 },
   hudState: { color: '#ffffff', marginTop: 4, fontSize: 14 },
-  controls: {
+  controlsSection: {
     position: 'absolute',
-    bottom: 30,
-    alignSelf: 'center',
+    bottom: 24,
+    width: '100%',
+    paddingHorizontal: 12,
     flexDirection: 'row',
-    columnGap: 10,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 10,
   },
   btn: {
     backgroundColor: '#1f1f1f',
@@ -682,6 +779,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#3a3a3a',
+    flexBasis: '22%',
+    alignItems: 'center',
   },
   btnDisabled: {
     backgroundColor: '#1f1f1f80',
@@ -773,4 +872,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#1f2a36',
   },
   pickerText: { color: '#ffffff', fontWeight: '700', textAlign: 'center' },
+  dashboardRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 18,
+  },
+  card: {
+    flex: 1,
+    backgroundColor: '#181818',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#262626',
+  },
+  cardH: { color: '#aaaaaa', fontSize: 12, marginBottom: 6 },
+  cardBig: { color: '#ffffff', fontSize: 24, fontWeight: '800' },
+  cardS: { color: '#cccccc', fontSize: 12, marginTop: 2 },
 });

@@ -20,6 +20,12 @@ const dateKeyLocal = (ms: number) => {
 const weekdayShort = (ms: number) =>
   new Date(ms).toLocaleDateString(undefined, { weekday: 'short' });
 
+const dayStart = (ms: number) => {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+};
+
 type BucketInternal = DayBucket & { formSum: number; durSum: number };
 
 export function last7DaysSummary(sessions: SessionRecord[]): DayBucket[] {
@@ -57,4 +63,56 @@ export function last7DaysSummary(sessions: SessionRecord[]): DayBucket[] {
       ...rest,
       avgForm: durSum ? Math.round(formSum / durSum) : 0,
     }));
+}
+
+export function todayTotals(list: SessionRecord[]) {
+  const start = dayStart(Date.now());
+  let reps = 0;
+  let sessions = 0;
+  const perExercise: Record<string, number> = {};
+
+  for (const session of list) {
+    if (dayStart(session.endedAt) !== start) continue;
+    reps += session.reps;
+    sessions += 1;
+    perExercise[session.exercise] =
+      (perExercise[session.exercise] ?? 0) + session.reps;
+  }
+
+  return { reps, sessions, perExercise };
+}
+
+export function weekTotals(list: SessionRecord[]) {
+  const end = dayStart(Date.now());
+  const start = end - 6 * DAY_MS;
+  let reps = 0;
+  let sessions = 0;
+  const perDay: Record<string, number> = {};
+
+  for (const session of list) {
+    const ds = dayStart(session.endedAt);
+    if (ds < start || ds > end) continue;
+    reps += session.reps;
+    sessions += 1;
+    const key = new Date(ds).toISOString().slice(0, 10);
+    perDay[key] = (perDay[key] ?? 0) + session.reps;
+  }
+
+  return { reps, sessions, perDay };
+}
+
+export function currentStreak(list: SessionRecord[]): number {
+  if (!list.length) return 0;
+  const daysWithActivity = new Set<number>();
+  for (const session of list) {
+    daysWithActivity.add(dayStart(session.endedAt));
+  }
+
+  let streak = 0;
+  let cursor = dayStart(Date.now());
+  while (daysWithActivity.has(cursor)) {
+    streak += 1;
+    cursor -= DAY_MS;
+  }
+  return streak;
 }
