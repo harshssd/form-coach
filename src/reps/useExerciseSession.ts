@@ -12,15 +12,20 @@ import {
   type RepUpdate as PushupRepUpdate,
 } from './pushupCounter';
 import {
-  computeValgusIndex,
-  makeValgusState,
-  shouldCueKneesOut,
+  DEFAULT_CALIBRATION_MS,
+  DEFAULT_MIN_STANCE_WIDTH,
+  computeValgus,
+  finalizeStanceCalib,
+  startStanceCalib,
+  updateStanceCalib,
+  type StanceBaseline,
+  type StanceCalib,
 } from '../pose/technique';
 import type { ExerciseSettings } from '../storage/settingsStore';
 import { say } from '../voice/tts';
 
 export type Exercise = 'squat' | 'pushup';
-export type SessionState = 'IDLE' | 'ACTIVE' | 'PAUSED';
+export type SessionState = 'IDLE' | 'CALIBRATING' | 'ACTIVE' | 'PAUSED';
 
 export type SessionSummary = {
   reps: number;
@@ -44,7 +49,7 @@ const cloneInitial = (exercise: Exercise): AnyRepUpdate =>
 
 export function useExerciseSession(
   keypoints: KP[],
-  { exercise, settings, onResetPoseStream, cueCooldownMs = 4000 }: Options,
+  { exercise, settings, onResetPoseStream, cueCooldownMs = 1200 }: Options,
 ) {
   const [session, setSession] = useState<SessionState>('IDLE');
   const [rep, setRep] = useState<AnyRepUpdate>(cloneInitial(exercise));
@@ -56,11 +61,20 @@ export function useExerciseSession(
   const lastRepStateRef = useRef<SquatRepState>('TOP');
   const lastRepCountRef = useRef(0);
   const lastTechniqueCueAt = useRef(0);
-  const valgusRef = useRef(makeValgusState());
   const formSumRef = useRef(0);
   const formSamplesRef = useRef(0);
   const repRef = useRef<AnyRepUpdate>(cloneInitial(exercise));
   const exerciseRef = useRef<Exercise>(exercise);
+  const repContextRef = useRef<{ kneesCueFired: boolean }>({
+    kneesCueFired: false,
+  });
+  const valgusHoldRef = useRef<number | null>(null);
+  const stanceBaselineRef = useRef<StanceBaseline | null>(null);
+  const calibrationRef = useRef<StanceCalib | null>(null);
+  const [stanceBaseline, setStanceBaseline] = useState<StanceBaseline | null>(
+    null,
+  );
+  const [calibrationProgress, setCalibrationProgress] = useState(0);
 
   const speak = useCallback(
     (text: string, cooldown = 700) => {
@@ -101,6 +115,48 @@ export function useExerciseSession(
   }, [session]);
 
   useEffect(() => {
+    if (session !== 'CALIBRATING' || exerciseRef.current !== 'squat') {
+      return;
+    }
+
+    const calibration = calibrationRef.current;
+    if (!calibration) {
+      return;
+    }
+
+    const updated = updateStanceCalib(calibration, keypoints);
+    calibrationRef.current = updated;
+
+    const elapsedMs = Date.now() - updated.startedAt;
+    const progress = Math.max(
+      0,
+      Math.min(1, elapsedMs / updated.durationMs),
+    );
+    setCalibrationProgress(progress);
+
+    if (elapsedMs >= updated.durationMs) {
+      const baseline = finalizeStanceCalib(updated, {
+        minStanceWidth: DEFAULT_MIN_STANCE_WIDTH,
+      });
+      stanceBaselineRef.current = baseline;
+      setStanceBaseline(baseline);
+      calibrationRef.current = null;
+      setCalibrationProgress(1);
+      sessionStartRef.current = Date.now();
+      setElapsed(0);
+      setSession('ACTIVE');
+      if (baseline) {
+        speak('stance calibrated');
+      }
+      speak('session started');
+    }
+  }, [
+    keypoints,
+    session,
+    speak,
+  ]);
+
+  useEffect(() => {
     if (session !== 'ACTIVE') {
       return;
     }
@@ -122,11 +178,12 @@ export function useExerciseSession(
         if (next.state === 'BOTTOM') {
           speak('down', 400);
         }
-        if (
-          next.state === 'TOP' &&
-          next.count > lastRepCountRef.current
-        ) {
-          speak('up', 400);
+        if (next.state === 'TOP') {
+          repContextRef.current.kneesCueFired = false;
+          valgusHoldRef.current = null;
+          if (next.count > lastRepCountRef.current) {
+            speak('up', 400);
+          }
         }
         lastRepStateRef.current = next.state;
       }
@@ -136,6 +193,8 @@ export function useExerciseSession(
           speak('nice rep', 800);
         }
         lastRepCountRef.current = next.count;
+        repContextRef.current.kneesCueFired = false;
+        valgusHoldRef.current = null;
       }
 
       const now = Date.now();
@@ -146,22 +205,40 @@ export function useExerciseSession(
         settings.enableTechniqueCues &&
         exerciseRef.current === 'squat'
       ) {
-        const valgusIndex = computeValgusIndex(keypoints);
-        const { next: nextValgus, fire } = shouldCueKneesOut(
-          valgusRef.current,
-          valgusIndex,
-          inCritical,
-          next.count,
-          {
-            emaAlpha: 0.25,
-            badThreshold: 0.2,
-            minBadFrames: 10,
-          },
-        );
-        valgusRef.current = nextValgus;
-        if (fire && now - lastTechniqueCueAt.current > cueCooldownMs) {
-          speak('knees out', 1200);
-          lastTechniqueCueAt.current = now;
+        const snapshot = computeValgus(keypoints, stanceBaselineRef.current, {
+          minStanceWidth: DEFAULT_MIN_STANCE_WIDTH,
+        });
+
+        const hasFlex =
+          snapshot != null &&
+          Math.max(snapshot.flexLeft, snapshot.flexRight) > 30;
+
+        if (!inCritical || !hasFlex || !snapshot) {
+          valgusHoldRef.current = null;
+        } else {
+          const peakValgus = Math.max(
+            snapshot.relLeft,
+            snapshot.relRight,
+          );
+          if (peakValgus >= 0.06) {
+            if (!valgusHoldRef.current) {
+              valgusHoldRef.current = now;
+            }
+            const heldLongEnough =
+              valgusHoldRef.current != null &&
+              now - valgusHoldRef.current >= 300;
+            if (
+              heldLongEnough &&
+              !repContextRef.current.kneesCueFired &&
+              now - lastTechniqueCueAt.current > cueCooldownMs
+            ) {
+              speak('knees out', 1200);
+              lastTechniqueCueAt.current = now;
+              repContextRef.current.kneesCueFired = true;
+            }
+          } else {
+            valgusHoldRef.current = null;
+          }
         }
       } else if (
         settings.enableTechniqueCues &&
@@ -184,10 +261,15 @@ export function useExerciseSession(
       setElapsed(0);
       sessionStartRef.current = null;
       sessionBeginRef.current = null;
-      valgusRef.current = makeValgusState();
       lastRepStateRef.current = 'TOP';
       lastRepCountRef.current = 0;
       lastTechniqueCueAt.current = 0;
+      repContextRef.current = { kneesCueFired: false };
+      valgusHoldRef.current = null;
+      stanceBaselineRef.current = null;
+      setStanceBaseline(null);
+      calibrationRef.current = null;
+      setCalibrationProgress(0);
       formSumRef.current = 0;
       formSamplesRef.current = 0;
       const init = cloneInitial(exerciseRef.current);
@@ -208,16 +290,33 @@ export function useExerciseSession(
     repRef.current = init;
     lastRepStateRef.current = init.state as SquatRepState;
     lastRepCountRef.current = init.count;
-    valgusRef.current = makeValgusState();
-    sessionStartRef.current = now;
     sessionBeginRef.current = now;
     formSumRef.current = 0;
     formSamplesRef.current = 0;
     lastTechniqueCueAt.current = 0;
+    repContextRef.current = { kneesCueFired: false };
+    valgusHoldRef.current = null;
+    stanceBaselineRef.current = null;
+    setStanceBaseline(null);
+    calibrationRef.current = null;
+    setCalibrationProgress(0);
     setElapsed(0);
     onResetPoseStream?.();
-    setSession('ACTIVE');
-    speak('session started');
+    sessionStartRef.current = null;
+    if (exerciseRef.current === 'squat') {
+      const calibration = startStanceCalib(
+        DEFAULT_CALIBRATION_MS,
+        now,
+      );
+      calibrationRef.current = calibration;
+      setCalibrationProgress(0);
+      setSession('CALIBRATING');
+      speak('hold still to calibrate stance');
+    } else {
+      sessionStartRef.current = now;
+      setSession('ACTIVE');
+      speak('session started');
+    }
   }, [onResetPoseStream, speak]);
 
   const pause = useCallback(() => {
@@ -266,5 +365,8 @@ export function useExerciseSession(
     resume,
     reset,
     getSummary,
+    stanceBaseline,
+    calibrating: session === 'CALIBRATING',
+    calibrationProgress,
   };
 }

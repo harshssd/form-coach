@@ -105,6 +105,8 @@ export default function CameraScreen() {
     resume: resumeSession,
     reset: resetSession,
     getSummary,
+    calibrating,
+    calibrationProgress,
   } = useExerciseSession(keypoints, {
     exercise,
     settings,
@@ -206,6 +208,9 @@ export default function CameraScreen() {
 
   const nextCameraPosition = cameraPosition === 'back' ? 'front' : 'back';
   const canSwitchCamera = availablePositions[nextCameraPosition];
+  const calibrationPercent = Math.round(
+    Math.max(0, Math.min(1, calibrationProgress)) * 100,
+  );
 
   const endAndSave = useCallback(() => {
     if (session !== 'PAUSED') {
@@ -277,9 +282,32 @@ export default function CameraScreen() {
           <PoseOverlay
             width={viewWidth}
             height={viewHeight}
-            keypoints={session === 'ACTIVE' ? keypoints : []}
+            keypoints={
+              session === 'ACTIVE' || session === 'CALIBRATING'
+                ? keypoints
+                : []
+            }
           />
         </PoseCamera>
+
+        {calibrating ? (
+          <View style={styles.calibrationOverlay}>
+            <Text style={styles.calibrationTitle}>
+              Hold still to calibrate stance…
+            </Text>
+            <View style={styles.calibrationBar}>
+              <View
+                style={[
+                  styles.calibrationBarFill,
+                  { width: `${calibrationPercent}%` },
+                ]}
+              />
+            </View>
+            <Text style={styles.calibrationProgressText}>
+              {calibrationPercent}%
+            </Text>
+          </View>
+        ) : null}
 
       <View style={styles.overlay}>
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
@@ -358,7 +386,7 @@ export default function CameraScreen() {
               <Btn
                 label="Exercise"
                 onPress={() => setPickerOpen(true)}
-                disabled={session === 'ACTIVE'}
+                disabled={session !== 'IDLE'}
               />
             </View>
             <View style={styles.controlCell}>
@@ -790,6 +818,40 @@ const styles = StyleSheet.create({
   },
   overlayText: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   debugText: { color: '#ffffff', marginTop: 4, fontSize: 12 },
+  calibrationOverlay: {
+    position: 'absolute',
+    top: 120,
+    left: 20,
+    right: 20,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    backgroundColor: '#000000cc',
+    borderRadius: 14,
+    alignItems: 'center',
+    gap: 12,
+  },
+  calibrationTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  calibrationBar: {
+    width: '100%',
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ffffff26',
+    overflow: 'hidden',
+  },
+  calibrationBarFill: {
+    height: '100%',
+    backgroundColor: '#3FA9F5',
+  },
+  calibrationProgressText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   hudExercise: {
     color: '#ffffff',
     fontWeight: '800',

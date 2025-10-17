@@ -1,87 +1,200 @@
 import type { KP } from './utils';
-import { byName } from './utils';
+import { angleDeg, byName } from './utils';
 
 const dist = (a: KP, b: KP) => Math.hypot(a.x - b.x, a.y - b.y);
+const MIN_CONFIDENCE = 0.5;
 
-export type ValgusState = {
-  ema: number;
-  badFrames: number;
-  repTag: number;
+export const DEFAULT_MIN_STANCE_WIDTH = 0.06;
+export const DEFAULT_CALIBRATION_MS = 2000;
+
+export type StanceBaseline = {
+  leftMedial: number;
+  rightMedial: number;
+  stanceWidth: number;
 };
 
-export const makeValgusState = (): ValgusState => ({
-  ema: 0,
-  badFrames: 0,
-  repTag: -1,
-});
+export type StanceCalib = {
+  startedAt: number;
+  durationMs: number;
+  totalSamples: number;
+  goodSamples: number;
+  sumLeftMedial: number;
+  sumRightMedial: number;
+  sumStanceWidth: number;
+};
 
-export function computeValgusIndex(kps: KP[]): number | null {
-  const m = byName(kps);
-  const lh = m['leftHip'];
-  const rh = m['rightHip'];
-  const lk = m['leftKnee'];
-  const rk = m['rightKnee'];
-  const la = m['leftAnkle'];
-  const ra = m['rightAnkle'];
+export type ValgusSnapshot = {
+  relLeft: number;
+  relRight: number;
+  flexLeft: number;
+  flexRight: number;
+  stanceWidth: number;
+  rawLeft: number;
+  rawRight: number;
+};
+
+type LegMeasurements = {
+  leftMedial: number;
+  rightMedial: number;
+  stanceWidth: number;
+  leftFlex: number;
+  rightFlex: number;
+};
+
+export function startStanceCalib(
+  durationMs = DEFAULT_CALIBRATION_MS,
+  now = Date.now(),
+): StanceCalib {
+  return {
+    startedAt: now,
+    durationMs,
+    totalSamples: 0,
+    goodSamples: 0,
+    sumLeftMedial: 0,
+    sumRightMedial: 0,
+    sumStanceWidth: 0,
+  };
+}
+
+export function updateStanceCalib(
+  calib: StanceCalib,
+  keypoints: KP[],
+): StanceCalib {
+  const next = {
+    ...calib,
+    totalSamples: calib.totalSamples + 1,
+  };
+
+  const measurements = measureLegs(keypoints);
+  if (!measurements) {
+    return next;
+  }
+
+  return {
+    ...next,
+    goodSamples: next.goodSamples + 1,
+    sumLeftMedial: next.sumLeftMedial + measurements.leftMedial,
+    sumRightMedial: next.sumRightMedial + measurements.rightMedial,
+    sumStanceWidth: next.sumStanceWidth + measurements.stanceWidth,
+  };
+}
+
+export function finalizeStanceCalib(
+  calib: StanceCalib,
+  {
+    minGoodSamples = 20,
+    minStanceWidth = DEFAULT_MIN_STANCE_WIDTH,
+  }: { minGoodSamples?: number; minStanceWidth?: number } = {},
+): StanceBaseline | null {
+  if (calib.goodSamples < minGoodSamples) {
+    return null;
+  }
+
+  const leftMedial = calib.sumLeftMedial / calib.goodSamples;
+  const rightMedial = calib.sumRightMedial / calib.goodSamples;
+  const stanceWidth = calib.sumStanceWidth / calib.goodSamples;
+
+  if (
+    !Number.isFinite(leftMedial) ||
+    !Number.isFinite(rightMedial) ||
+    !Number.isFinite(stanceWidth) ||
+    stanceWidth < minStanceWidth
+  ) {
+    return null;
+  }
+
+  return {
+    leftMedial,
+    rightMedial,
+    stanceWidth,
+  };
+}
+
+export function computeValgus(
+  keypoints: KP[],
+  baseline: StanceBaseline | null,
+  {
+    minStanceWidth = DEFAULT_MIN_STANCE_WIDTH,
+  }: { minStanceWidth?: number } = {},
+): ValgusSnapshot | null {
+  if (!baseline) {
+    return null;
+  }
+
+  const measurements = measureLegs(keypoints);
+  if (!measurements) {
+    return null;
+  }
+
+  if (
+    baseline.stanceWidth < minStanceWidth ||
+    measurements.stanceWidth < minStanceWidth * 0.65
+  ) {
+    return null;
+  }
+
+  const relLeft = Math.max(0, measurements.leftMedial - baseline.leftMedial);
+  const relRight = Math.max(0, measurements.rightMedial - baseline.rightMedial);
+
+  return {
+    relLeft,
+    relRight,
+    flexLeft: measurements.leftFlex,
+    flexRight: measurements.rightFlex,
+    stanceWidth: measurements.stanceWidth,
+    rawLeft: measurements.leftMedial,
+    rawRight: measurements.rightMedial,
+  };
+}
+
+function measureLegs(keypoints: KP[]): LegMeasurements | null {
+  const map = byName(keypoints);
+  const lh = map['leftHip'];
+  const rh = map['rightHip'];
+  const lk = map['leftKnee'];
+  const rk = map['rightKnee'];
+  const la = map['leftAnkle'];
+  const ra = map['rightAnkle'];
 
   if (!lh || !rh || !lk || !rk || !la || !ra) {
     return null;
   }
 
   const pts = [lh, rh, lk, rk, la, ra];
-  if (pts.some((p) => p.score != null && p.score < 0.55)) {
+  if (pts.some((p) => p.score != null && p.score < MIN_CONFIDENCE)) {
     return null;
   }
-
-  const leftInward = Math.max(0, la.x - lk.x);
-  const rightInward = Math.max(0, rk.x - ra.x);
 
   const pelvis = dist(lh, rh);
-  if (!pelvis || pelvis < 0.05) {
+  if (!pelvis || pelvis < 1e-3) {
     return null;
   }
 
-  const raw = (leftInward + rightInward) / (2 * pelvis);
-  return Math.max(0, Math.min(1, raw));
-}
+  const axisX = (rh.x - lh.x) / pelvis;
+  const axisY = (rh.y - lh.y) / pelvis;
 
-export function shouldCueKneesOut(
-  st: ValgusState,
-  index: number | null,
-  isInCriticalPhase: boolean,
-  repId: number,
-  {
-    emaAlpha = 0.25,
-    badThreshold = 0.18,
-    minBadFrames = 8,
-  }: {
-    emaAlpha?: number;
-    badThreshold?: number;
-    minBadFrames?: number;
-  } = {},
-): { next: ValgusState; fire: boolean } {
-  let { ema, badFrames, repTag } = st;
+  const project = (dx: number, dy: number) => dx * axisX + dy * axisY;
 
-  if (index == null || !isInCriticalPhase) {
-    ema = ema * (1 - emaAlpha);
-    badFrames = Math.max(0, badFrames - 1);
-    return { next: { ema, badFrames, repTag }, fire: false };
-  }
+  const leftMedial = Math.max(
+    0,
+    project(lk.x - la.x, lk.y - la.y) / pelvis,
+  );
+  const rightMedial = Math.max(
+    0,
+    project(ra.x - rk.x, ra.y - rk.y) / pelvis,
+  );
 
-  ema = (1 - emaAlpha) * ema + emaAlpha * index;
+  const stanceWidth =
+    Math.abs(project(ra.x - la.x, ra.y - la.y)) / pelvis;
 
-  if (ema > badThreshold) {
-    badFrames += 1;
-  } else {
-    badFrames = Math.max(0, badFrames - 1);
-  }
+  const leftFlex = Math.max(0, 180 - angleDeg(lh, lk, la));
+  const rightFlex = Math.max(0, 180 - angleDeg(rh, rk, ra));
 
-  const canFire = badFrames >= minBadFrames && repId !== repTag;
-  if (canFire) {
-    repTag = repId;
-    badFrames = Math.floor(minBadFrames / 2);
-    return { next: { ema, badFrames, repTag }, fire: true };
-  }
-
-  return { next: { ema, badFrames, repTag }, fire: false };
+  return {
+    leftMedial,
+    rightMedial,
+    stanceWidth,
+    leftFlex,
+    rightFlex,
+  };
 }
