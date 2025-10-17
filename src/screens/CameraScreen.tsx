@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import Svg, { Circle, Rect, Text as SvgText } from 'react-native-svg';
+import Replayer from './Replayer';
 import { useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
 import { PoseCamera } from '../camera/PoseCamera';
@@ -106,8 +107,7 @@ export default function CameraScreen() {
   const [lastRecordingPath, setLastRecordingPath] = useState<string | null>(
     null,
   );
-  const [runsOpen, setRunsOpen] = useState(false);
-  const [runs, setRuns] = useState<{ id: string; path: string }[]>([]);
+  const [replayerOpen, setReplayerOpen] = useState(false);
 
   const {
     session,
@@ -182,20 +182,6 @@ export default function CameraScreen() {
       `exercise=${exercise}`,
     );
   }, [hasPermission, device, keypoints.length, session, exercise]);
-
-  const openRuns = useCallback(async () => {
-    try {
-      const list = await poseRecorder.listRuns();
-      setRuns(list.slice().reverse());
-      setRunsOpen(true);
-    } catch (error) {
-      console.warn('[PoseRecorder] listRuns failed', error);
-    }
-  }, []);
-
-  const closeRuns = useCallback(() => {
-    setRunsOpen(false);
-  }, []);
 
   useEffect(() => {
     if (!recording) {
@@ -525,7 +511,10 @@ export default function CameraScreen() {
               />
             </View>
             <View style={styles.controlCell}>
-              <Btn label="Recordings" onPress={openRuns} />
+              <Btn
+                label="Replayer"
+                onPress={() => setReplayerOpen(true)}
+              />
             </View>
             <View style={styles.controlCell}>
               <Btn label="History" onPress={openHistory} />
@@ -598,35 +587,12 @@ export default function CameraScreen() {
       </Modal>
 
       <Modal
-        visible={runsOpen}
-        transparent
+        visible={replayerOpen}
         animationType="slide"
-        onRequestClose={closeRuns}
+        presentationStyle="fullScreen"
+        onRequestClose={() => setReplayerOpen(false)}
       >
-        <View style={styles.modalWrap}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Recordings</Text>
-              <Pressable style={styles.modalClose} onPress={closeRuns}>
-                <Text style={styles.btnText}>Close</Text>
-              </Pressable>
-            </View>
-            {runs.length === 0 ? (
-              <Text style={styles.historyEmpty}>No recordings saved yet.</Text>
-            ) : (
-              <FlatList
-                data={runs}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => (
-                  <View style={styles.runRow}>
-                    <Text style={styles.runTitle}>{item.id}</Text>
-                    <Text style={styles.runPath}>{item.path}</Text>
-                  </View>
-                )}
-              />
-            )}
-          </View>
-        </View>
+        <Replayer onClose={() => setReplayerOpen(false)} />
       </Modal>
 
       <Modal
@@ -1158,13 +1124,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 16,
   },
-  runRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1f1f1f',
-  },
-  runTitle: { color: '#ffffff', fontWeight: '700' },
-  runPath: { color: '#ffffff88', marginTop: 4, fontSize: 12 },
   legendRow: {
     flexDirection: 'row',
     justifyContent: 'center',
