@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Rect, Text as SvgText } from 'react-native-svg';
 import { KP } from '../pose/utils';
 import { PoseCamera } from '../camera/PoseCamera';
 import { useCameraSelection } from '../camera/useCameraSelection';
@@ -28,6 +28,7 @@ import {
   listSessions,
   type SessionRecord,
 } from '../storage/sessionStore';
+import { last7DaysSummary, type DayBucket } from '../storage/selectors';
 import { say } from '../voice/tts';
 
 type RawPoint = {
@@ -64,6 +65,7 @@ export default function CameraScreen() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<SessionRecord[]>([]);
+  const [weekly, setWeekly] = useState<DayBucket[]>([]);
 
   const {
     session,
@@ -77,7 +79,9 @@ export default function CameraScreen() {
   } = useSquatSession(keypoints, { onResetPoseStream: resetPoseStream });
 
   useEffect(() => {
-    setHistory(listSessions());
+    const list = listSessions();
+    setHistory(list);
+    setWeekly(last7DaysSummary(list));
   }, []);
 
   const pushFrame = useRunOnJS(
@@ -177,13 +181,17 @@ export default function CameraScreen() {
       durationMs: summary.durationMs,
     };
     addSession(record);
-    setHistory(listSessions());
+    const list = listSessions();
+    setHistory(list);
+    setWeekly(last7DaysSummary(list));
     say('session saved');
     resetSession({ speak: false });
   }, [session, getSummary, resetSession]);
 
   const openHistory = useCallback(() => {
-    setHistory(listSessions());
+    const list = listSessions();
+    setHistory(list);
+    setWeekly(last7DaysSummary(list));
     setHistoryOpen(true);
   }, []);
 
@@ -263,6 +271,11 @@ export default function CameraScreen() {
                 <Text style={styles.btnText}>Close</Text>
               </Pressable>
             </View>
+            {weekly.length > 0 && <WeeklyChart data={weekly} />}
+            <View style={styles.legendRow}>
+              <Text style={styles.legendText}>Bars: Reps</Text>
+              <Text style={styles.legendText}>Tick: Avg form</Text>
+            </View>
             <FlatList
               data={history}
               keyExtractor={(item) => item.id}
@@ -292,6 +305,93 @@ function fmtDuration(ms: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function WeeklyChart({ data }: { data: DayBucket[] }) {
+  if (!data.length) {
+    return null;
+  }
+
+  const width = 320;
+  const height = 150;
+  const padding = 14;
+  const barGap = 8;
+  const barWidth = Math.max(8, Math.floor((width - padding * 2 - (data.length - 1) * barGap) / data.length));
+  const maxReps = Math.max(1, ...data.map((d) => d.reps));
+
+  return (
+    <Svg
+      width={width}
+      height={height}
+      style={{ alignSelf: 'center', marginVertical: 8 }}
+    >
+      <SvgText
+        x={padding}
+        y={12}
+        fontSize={10}
+        fill="white"
+        opacity={0.7}
+      >
+        Last 7 days
+      </SvgText>
+      <SvgText
+        x={width - padding}
+        y={12}
+        fontSize={10}
+        fill="white"
+        opacity={0.7}
+        textAnchor="end"
+      >
+        reps / avg form
+      </SvgText>
+
+      {data.map((day, idx) => {
+        const x = padding + idx * (barWidth + barGap);
+        const chartHeight = height - 40;
+        const barHeight = Math.round((chartHeight * day.reps) / maxReps);
+        const y = height - 28 - barHeight;
+        const tickWidth = Math.max(2, Math.round((barWidth * day.avgForm) / 100));
+
+        return (
+          <React.Fragment key={day.dateKey}>
+            <Rect
+              x={x}
+              y={y}
+              width={barWidth}
+              height={barHeight}
+              rx={4}
+              fill="#3FA9F5"
+              opacity={day.reps === 0 ? 0.25 : 0.9}
+            />
+            <Rect
+              x={x}
+              y={height - 30}
+              width={barWidth}
+              height={2}
+              fill="#ffffff33"
+            />
+            <Rect
+              x={x}
+              y={height - 30}
+              width={tickWidth}
+              height={2}
+              fill="#FFD166"
+            />
+            <SvgText
+              x={x + barWidth / 2}
+              y={height - 8}
+              fontSize={10}
+              fill="white"
+              textAnchor="middle"
+              opacity={0.85}
+            >
+              {day.label}
+            </SvgText>
+          </React.Fragment>
+        );
+      })}
+    </Svg>
+  );
 }
 
 function PoseOverlay({
@@ -441,4 +541,11 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 16,
   },
+  legendRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    columnGap: 16,
+    marginBottom: 8,
+  },
+  legendText: { color: '#ffffff', opacity: 0.75, fontSize: 12 },
 });
