@@ -1,24 +1,17 @@
 import { useCallback, useRef, useState } from 'react';
 import type { KP } from './utils';
 import {
-  filterAndSmooth,
-  toArray,
-  type Smoothed,
+  KPSmoother,
+  type SmoothedKeypoint,
+  type RawKeypoint,
 } from './smoothing';
-
-type RawPoint = {
-  name?: string;
-  x: number;
-  y: number;
-  score?: number;
-};
 
 export type PoseFramePayload = {
   width: number;
   height: number;
   orientation: number;
   isMirrored: boolean;
-  points: RawPoint[];
+  points: RawKeypoint[];
 };
 
 type PoseStreamOptions = {
@@ -27,18 +20,36 @@ type PoseStreamOptions = {
   displayMirrored: boolean;
 };
 
+export type CanonicalSignals = {
+  squatDepth: number;
+  kneeFlex: number;
+  valgus: number;
+  elbowFlex: number;
+  plankStraight: number;
+};
+
+const ZERO_SIGNALS: CanonicalSignals = {
+  squatDepth: 0,
+  kneeFlex: 180,
+  valgus: 0,
+  elbowFlex: 180,
+  plankStraight: 0,
+};
+
 export function usePoseStream({
   viewWidth,
   viewHeight,
   displayMirrored,
 }: PoseStreamOptions) {
-  const smoothRef = useRef<Smoothed | null>(null);
+  const smootherRef = useRef(new KPSmoother());
   const [keypoints, setKeypoints] = useState<KP[]>([]);
+  const [signals, setSignals] = useState<CanonicalSignals>(ZERO_SIGNALS);
   const [debug, setDebug] = useState<string | null>(null);
 
   const reset = useCallback(() => {
-    smoothRef.current = null;
+    smootherRef.current.reset();
     setKeypoints([]);
+    setSignals(ZERO_SIGNALS);
     setDebug(null);
   }, []);
 
@@ -50,8 +61,9 @@ export function usePoseStream({
         viewWidth === 0 ||
         viewHeight === 0
       ) {
-        smoothRef.current = null;
+        smootherRef.current.reset();
         setKeypoints([]);
+        setSignals(ZERO_SIGNALS);
         setDebug(
           payload
             ? `pts:0 w:${payload.width} h:${payload.height}`
@@ -67,11 +79,18 @@ export function usePoseStream({
         displayMirrored,
       );
 
-      smoothRef.current = filterAndSmooth(smoothRef.current, normalized);
-      const smoothArr = toArray(smoothRef.current ?? {});
-      setKeypoints(smoothArr);
+      const smoothed = smootherRef.current.step(normalized);
+      const smoothKP: KP[] = smoothed.map((kp) => ({
+        name: kp.name,
+        x: kp.x,
+        y: kp.y,
+        score: kp.c,
+      }));
+
+      setKeypoints(smoothKP);
+      setSignals(computeSignals(smoothed));
       setDebug(
-        `pts:${smoothArr.length} w:${payload.width} h:${payload.height} orient:${payload.orientation} mirrored:${payload.isMirrored}`,
+        `pts:${smoothKP.length} w:${payload.width} h:${payload.height} orient:${payload.orientation} mirrored:${payload.isMirrored}`,
       );
     },
     [viewWidth, viewHeight, displayMirrored],
@@ -79,6 +98,7 @@ export function usePoseStream({
 
   return {
     keypoints,
+    signals,
     debug,
     handleFrame,
     reset,
@@ -90,7 +110,7 @@ function transformPosePoints(
   viewWidth: number,
   viewHeight: number,
   displayMirrored: boolean,
-): KP[] {
+): RawKeypoint[] {
   const { width, height, orientation, isMirrored, points } = payload;
   if (!width || !height || points.length === 0) {
     return [];
@@ -106,8 +126,10 @@ function transformPosePoints(
   const offsetX = (scaledWidth - viewWidth) / 2;
   const offsetY = (scaledHeight - viewHeight) / 2;
 
-  const result: KP[] = [];
+  const result: RawKeypoint[] = [];
   for (const point of points) {
+    if (!point.name) continue;
+
     let { x, y } = rotatePoint(
       point.x,
       point.y,
@@ -131,7 +153,7 @@ function transformPosePoints(
         name: point.name,
         x: clamp01(normX),
         y: clamp01(normY),
-        score: point.score,
+        c: point.c ?? point.score,
       });
     }
   }
@@ -145,7 +167,7 @@ function rotatePoint(
   width: number,
   height: number,
   orientation: number,
-): { x: number; y: number } {
+) {
   switch (orientation) {
     case 0:
       return { x, y };
@@ -162,4 +184,100 @@ function rotatePoint(
 
 function clamp01(value: number) {
   return Math.max(0, Math.min(1, value));
+}
+
+function computeSignals(points: SmoothedKeypoint[]): CanonicalSignals {
+  if (!points.length) return ZERO_SIGNALS;
+
+  const map: Record<string, SmoothedKeypoint> = {};
+  for (const kp of points) {
+    map[kp.name] = kp;
+  }
+
+  const pick = (...names: string[]) => {
+    for (const n of names) {
+      if (map[n]) return map[n];
+    }
+    return null;
+  };
+
+  const hip = pick('rightHip', 'leftHip');
+  const ankle = pick('rightAnkle', 'leftAnkle');
+  const hipR = map['rightHip'];
+  const hipL = map['leftHip'];
+  const kneeR = map['rightKnee'];
+  const kneeL = map['leftKnee'];
+  const ankleR = map['rightAnkle'];
+  const ankleL = map['leftAnkle'];
+
+  let kneeFlex = 180;
+  if (hipR && kneeR && ankleR) {
+    kneeFlex = Math.min(kneeFlex, angleDeg(hipR, kneeR, ankleR));
+  }
+  if (hipL && kneeL && ankleL) {
+    kneeFlex = Math.min(kneeFlex, angleDeg(hipL, kneeL, ankleL));
+  }
+
+  let squatDepth = 0;
+  if (hip && ankle) {
+    const leg = Math.max(1e-6, dist(hip, ankle));
+    const drop = Math.max(0, hip.y - Math.min(hip.y, ankle.y - 0.05));
+    squatDepth = Math.max(0, Math.min(1, drop / (0.9 * leg)));
+  }
+
+  let valgus = 0;
+  if (hipR && kneeR && ankleR) {
+    const ux = ankleR.x - hipR.x;
+    const uy = ankleR.y - hipR.y;
+    const vx = kneeR.x - hipR.x;
+    const vy = kneeR.y - hipR.y;
+    const proj = (vx * ux + vy * uy) / Math.max(1e-6, ux * ux + uy * uy);
+    const px = hipR.x + proj * ux;
+    const py = hipR.y + proj * uy;
+    const lateral = kneeR.x - px;
+    const cross = ux * vy - uy * vx;
+    valgus = -lateral * Math.sign(cross || 1);
+  }
+
+  const shoulder = pick('rightShoulder', 'leftShoulder');
+  const elbow = pick('rightElbow', 'leftElbow');
+  const wrist = pick('rightWrist', 'leftWrist');
+  const hipP = pick('rightHip', 'leftHip');
+  const ankleP = pick('rightAnkle', 'leftAnkle');
+
+  let elbowFlex = 180;
+  if (shoulder && elbow && wrist) {
+    elbowFlex = angleDeg(shoulder, elbow, wrist);
+  }
+
+  let plankStraight = 0;
+  if (shoulder && hipP && ankleP) {
+    const straight = angleDeg(shoulder, hipP, ankleP);
+    plankStraight = Math.max(0, Math.min(1, (straight - 150) / 30));
+  }
+
+  return {
+    squatDepth,
+    kneeFlex: Number.isFinite(kneeFlex) ? kneeFlex : 180,
+    valgus,
+    elbowFlex: Number.isFinite(elbowFlex) ? elbowFlex : 180,
+    plankStraight,
+  };
+}
+
+function dist(a: SmoothedKeypoint, b: SmoothedKeypoint) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function angleDeg(a: SmoothedKeypoint, b: SmoothedKeypoint, c: SmoothedKeypoint) {
+  const v1x = a.x - b.x;
+  const v1y = a.y - b.y;
+  const v2x = c.x - b.x;
+  const v2y = c.y - b.y;
+  const dot = v1x * v2x + v1y * v2y;
+  const m1 = Math.hypot(v1x, v1y);
+  const m2 = Math.hypot(v2x, v2y);
+  if (!m1 || !m2) return 180;
+  const cos = Math.min(1, Math.max(-1, dot / (m1 * m2)));
+  return (Math.acos(cos) * 180) / Math.PI;
 }

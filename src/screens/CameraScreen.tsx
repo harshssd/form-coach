@@ -50,6 +50,7 @@ type RawPoint = {
   y: number;
   score?: number;
   name?: string;
+  c?: number;
 };
 
 export default function CameraScreen() {
@@ -68,6 +69,7 @@ export default function CameraScreen() {
 
   const {
     keypoints,
+    signals,
     debug,
     handleFrame,
     reset: resetPoseStream,
@@ -179,6 +181,7 @@ export default function CameraScreen() {
           x: value.x,
           y: value.y,
           score: value.score,
+          c: value.score,
         });
       }
     }
@@ -283,47 +286,91 @@ export default function CameraScreen() {
         {debug ? <Text style={styles.debugText}>{debug}</Text> : null}
       </View>
 
-      <View style={styles.hud}>
-        <Text style={styles.hudExercise}>{exercise.toUpperCase()}</Text>
-        <Text style={styles.hudLabel}>REPS</Text>
-        <Text style={styles.hudCount}>{rep.count}</Text>
-        <Text style={styles.hudLabel}>Form: {rep.score}</Text>
-        <Text style={styles.hudState}>
-          {session} • {(elapsed / 1000).toFixed(1)}s
-        </Text>
-      </View>
+      <View style={styles.controlsSection}>
+        <View style={styles.hudStrip}>
+          <View style={styles.hudBlock}>
+            <Text style={styles.hudExercise}>{exercise.toUpperCase()}</Text>
+            <Text style={styles.hudLabel}>REPS</Text>
+            <Text style={styles.hudCount}>{rep.count}</Text>
+          </View>
+          <View style={styles.hudBlock}>
+            <Text style={styles.hudLabel}>Form</Text>
+            <Text style={styles.hudCountSmall}>{rep.score}</Text>
+            <Text style={styles.hudState}>
+              {session} • {(elapsed / 1000).toFixed(1)}s
+            </Text>
+          </View>
+          <View style={styles.hudBlockWide}>
+            <Text style={styles.signalText}>
+              depth {signals.squatDepth.toFixed(2)} • knee° {Math.round(signals.kneeFlex)} • valgus {signals.valgus.toFixed(2)}
+            </Text>
+            <Text style={styles.signalText}>
+              elbow° {Math.round(signals.elbowFlex)} • plank {signals.plankStraight.toFixed(2)}
+            </Text>
+          </View>
+        </View>
 
-        <View style={styles.controlsSection}>
-          {session === 'IDLE' && <Btn label="Start" onPress={startSession} />}
-          {session === 'ACTIVE' && <Btn label="Pause" onPress={pauseSession} />}
-          {session === 'PAUSED' && <Btn label="Resume" onPress={resumeSession} />}
-          {(session === 'ACTIVE' || session === 'PAUSED') && (
-            <Btn label="Reset" onPress={() => resetSession()} />
-          )}
-          {session === 'PAUSED' && (
-            <Btn label="End & Save" onPress={endAndSave} />
-          )}
-          <Btn
-            label={cameraPosition === 'back' ? 'Front' : 'Back'}
-            onPress={() =>
-              canSwitchCamera && setCameraPosition(nextCameraPosition)
-            }
-            disabled={!canSwitchCamera}
-          />
-          <Btn label="History" onPress={openHistory} />
-          <Btn label="Dashboard" onPress={openDashboard} />
-          <Btn
-            label="Exercise"
-            onPress={() => setPickerOpen(true)}
-            disabled={session === 'ACTIVE'}
-          />
-          <Btn
-            label="Settings"
-            onPress={() => {
-              setSettings(loadSettings(exercise));
-              setSettingsOpen(true);
-            }}
-          />
+        <View style={styles.controlRow}>
+          {session === 'IDLE' && (
+            <View style={styles.controlCell}>
+              <Btn label="Start" onPress={startSession} />
+              </View>
+            )}
+            {session === 'ACTIVE' && (
+              <View style={styles.controlCell}>
+                <Btn label="Pause" onPress={pauseSession} />
+              </View>
+            )}
+            {session === 'PAUSED' && (
+              <View style={styles.controlCell}>
+                <Btn label="Resume" onPress={resumeSession} />
+              </View>
+            )}
+            {(session === 'ACTIVE' || session === 'PAUSED') && (
+              <View style={styles.controlCell}>
+                <Btn label="Reset" onPress={() => resetSession()} />
+              </View>
+            )}
+            {session === 'PAUSED' && (
+              <View style={styles.controlCell}>
+                <Btn label="End & Save" onPress={endAndSave} />
+              </View>
+            )}
+            <View style={styles.controlCell}>
+              <Btn
+                label={cameraPosition === 'back' ? 'Front' : 'Back'}
+                onPress={() =>
+                  canSwitchCamera && setCameraPosition(nextCameraPosition)
+                }
+                disabled={!canSwitchCamera}
+              />
+            </View>
+          </View>
+
+          <View style={[styles.controlRow, styles.controlRowSecondary]}>
+            <View style={styles.controlCell}>
+              <Btn label="History" onPress={openHistory} />
+            </View>
+            <View style={styles.controlCell}>
+              <Btn label="Dashboard" onPress={openDashboard} />
+            </View>
+            <View style={styles.controlCell}>
+              <Btn
+                label="Exercise"
+                onPress={() => setPickerOpen(true)}
+                disabled={session === 'ACTIVE'}
+              />
+            </View>
+            <View style={styles.controlCell}>
+              <Btn
+                label="Settings"
+                onPress={() => {
+                  setSettings(loadSettings(exercise));
+                  setSettingsOpen(true);
+                }}
+              />
+            </View>
+          </View>
         </View>
       </View>
 
@@ -743,16 +790,6 @@ const styles = StyleSheet.create({
   },
   overlayText: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   debugText: { color: '#ffffff', marginTop: 4, fontSize: 12 },
-  hud: {
-    position: 'absolute',
-    bottom: 100,
-    alignSelf: 'center',
-    padding: 12,
-    backgroundColor: '#000000b0',
-    borderRadius: 12,
-    alignItems: 'center',
-    minWidth: 160,
-  },
   hudExercise: {
     color: '#ffffff',
     fontWeight: '800',
@@ -762,15 +799,51 @@ const styles = StyleSheet.create({
   hudLabel: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
   hudCount: { color: '#ffffff', fontSize: 48, fontWeight: '800', lineHeight: 50 },
   hudState: { color: '#ffffff', marginTop: 4, fontSize: 14 },
+  signalText: { color: '#ffffff', fontSize: 12, marginBottom: 2 },
   controlsSection: {
     position: 'absolute',
     bottom: 24,
     width: '100%',
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    gap: 12,
+  },
+  hudStrip: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
+    gap: 12,
+  },
+  hudBlock: {
+    backgroundColor: '#000000aa',
+    padding: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    minWidth: 110,
+  },
+  hudBlockWide: {
+    flex: 1,
+    backgroundColor: '#000000aa',
+    padding: 12,
+    borderRadius: 12,
+  },
+  hudCountSmall: { color: '#ffffff', fontSize: 36, fontWeight: '700' },
+  controlRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  controlRowSecondary: {
+    marginTop: 4,
+  },
+  controlCell: {
+    minWidth: 90,
+    marginHorizontal: 6,
+    marginVertical: 2,
+    flexBasis: '22%',
+    flexGrow: 1,
   },
   btn: {
     backgroundColor: '#1f1f1f',
@@ -779,8 +852,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#3a3a3a',
-    flexBasis: '22%',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   btnDisabled: {
     backgroundColor: '#1f1f1f80',
