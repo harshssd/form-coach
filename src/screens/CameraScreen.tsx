@@ -1,8 +1,6 @@
 import React, {
   useCallback,
   useEffect,
-  useMemo,
-  useRef,
   useState,
 } from 'react';
 import {
@@ -11,6 +9,8 @@ import {
   StyleSheet,
   LayoutChangeEvent,
   Pressable,
+  Modal,
+  FlatList,
 } from 'react-native';
 import { useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
@@ -23,6 +23,12 @@ import {
   type PoseFramePayload,
 } from '../pose/usePoseStream';
 import { useSquatSession } from '../reps/useSquatSession';
+import {
+  addSession,
+  listSessions,
+  type SessionRecord,
+} from '../storage/sessionStore';
+import { say } from '../voice/tts';
 
 type RawPoint = {
   x: number;
@@ -56,6 +62,9 @@ export default function CameraScreen() {
     displayMirrored,
   });
 
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<SessionRecord[]>([]);
+
   const {
     session,
     rep,
@@ -64,7 +73,12 @@ export default function CameraScreen() {
     pause: pauseSession,
     resume: resumeSession,
     reset: resetSession,
+    getSummary,
   } = useSquatSession(keypoints, { onResetPoseStream: resetPoseStream });
+
+  useEffect(() => {
+    setHistory(listSessions());
+  }, []);
 
   const pushFrame = useRunOnJS(
     (payload: PoseFramePayload | null) => {
@@ -148,6 +162,35 @@ export default function CameraScreen() {
   const nextCameraPosition = cameraPosition === 'back' ? 'front' : 'back';
   const canSwitchCamera = availablePositions[nextCameraPosition];
 
+  const endAndSave = useCallback(() => {
+    if (session !== 'PAUSED') {
+      return;
+    }
+    const summary = getSummary();
+    const record: SessionRecord = {
+      id: `${summary.endedAt}`,
+      exercise: 'squat',
+      reps: summary.reps,
+      avgForm: summary.avgForm,
+      startedAt: summary.startedAt,
+      endedAt: summary.endedAt,
+      durationMs: summary.durationMs,
+    };
+    addSession(record);
+    setHistory(listSessions());
+    say('session saved');
+    resetSession({ speak: false });
+  }, [session, getSummary, resetSession]);
+
+  const openHistory = useCallback(() => {
+    setHistory(listSessions());
+    setHistoryOpen(true);
+  }, []);
+
+  const closeHistory = useCallback(() => {
+    setHistoryOpen(false);
+  }, []);
+
   if (!device) {
     return (
       <Centered
@@ -157,12 +200,13 @@ export default function CameraScreen() {
   }
 
   return (
-    <View style={styles.container} onLayout={onLayout}>
-      <PoseCamera
-        device={device}
-        displayMirrored={displayMirrored}
-        frameProcessor={frameProcessor}
-        isActive
+    <>
+      <View style={styles.container} onLayout={onLayout}>
+        <PoseCamera
+          device={device}
+          displayMirrored={displayMirrored}
+          frameProcessor={frameProcessor}
+          isActive
         pixelFormat="yuv"
       >
         <PoseOverlay
@@ -186,94 +230,68 @@ export default function CameraScreen() {
         </Text>
       </View>
 
-      <View style={styles.controls}>
-        {session === 'IDLE' && <Btn label="Start" onPress={startSession} />}
-        {session === 'ACTIVE' && <Btn label="Pause" onPress={pauseSession} />}
-        {session === 'PAUSED' && <Btn label="Resume" onPress={resumeSession} />}
-        {(session === 'ACTIVE' || session === 'PAUSED') && (
-          <Btn label="Reset" onPress={resetSession} />
-        )}
-        <Btn
-          label={cameraPosition === 'back' ? 'Front' : 'Back'}
-          onPress={() => canSwitchCamera && setCameraPosition(nextCameraPosition)}
-          disabled={!canSwitchCamera}
-        />
+        <View style={styles.controls}>
+          {session === 'IDLE' && <Btn label="Start" onPress={startSession} />}
+          {session === 'ACTIVE' && <Btn label="Pause" onPress={pauseSession} />}
+          {session === 'PAUSED' && <Btn label="Resume" onPress={resumeSession} />}
+          {(session === 'ACTIVE' || session === 'PAUSED') && (
+            <Btn label="Reset" onPress={() => resetSession()} />
+          )}
+          {session === 'PAUSED' && (
+            <Btn label="End & Save" onPress={endAndSave} />
+          )}
+          <Btn label="History" onPress={openHistory} />
+          <Btn
+            label={cameraPosition === 'back' ? 'Front' : 'Back'}
+            onPress={() => canSwitchCamera && setCameraPosition(nextCameraPosition)}
+            disabled={!canSwitchCamera}
+          />
+        </View>
       </View>
-    </View>
+
+      <Modal
+        visible={historyOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={closeHistory}
+      >
+        <View style={styles.modalWrap}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>History</Text>
+              <Pressable style={styles.modalClose} onPress={closeHistory}>
+                <Text style={styles.btnText}>Close</Text>
+              </Pressable>
+            </View>
+            <FlatList
+              data={history}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <View style={styles.historyRow}>
+                  <Text style={styles.historyTime}>
+                    {new Date(item.endedAt).toLocaleString()}
+                  </Text>
+                  <Text style={styles.historySummary}>
+                    {item.exercise.toUpperCase()} • {item.reps} reps • {item.avgForm}% • {fmtDuration(item.durationMs)}
+                  </Text>
+                </View>
+              )}
+              ListEmptyComponent={
+                <Text style={styles.historyEmpty}>No sessions yet.</Text>
+              }
+            />
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }
 
-function transformPosePoints(
-  data: PoseFrame,
-  viewWidth: number,
-  viewHeight: number,
-  displayMirrored: boolean,
-): KP[] {
-  const { width, height, orientation, isMirrored, points } = data;
-  if (!width || !height || points.length === 0) {
-    return [];
-  }
-
-  const normalizedOrientation = ((orientation % 360) + 360) % 360;
-  const rotatedWidth = normalizedOrientation % 180 === 0 ? width : height;
-  const rotatedHeight = normalizedOrientation % 180 === 0 ? height : width;
-
-  const scale = Math.max(viewWidth / rotatedWidth, viewHeight / rotatedHeight);
-  const scaledWidth = rotatedWidth * scale;
-  const scaledHeight = rotatedHeight * scale;
-  const offsetX = (scaledWidth - viewWidth) / 2;
-  const offsetY = (scaledHeight - viewHeight) / 2;
-
-  const result: KP[] = [];
-  for (const point of points) {
-    let { x, y } = rotatePoint(point.x, point.y, width, height, normalizedOrientation);
-    const shouldMirror = displayMirrored ? !isMirrored : isMirrored;
-    if (shouldMirror) {
-      x = rotatedWidth - x;
-    }
-
-    const scaledX = x * scale - offsetX;
-    const scaledY = y * scale - offsetY;
-
-    const normX = scaledX / viewWidth;
-    const normY = scaledY / viewHeight;
-
-    if (Number.isFinite(normX) && Number.isFinite(normY)) {
-      result.push({
-        name: point.name,
-        x: clamp01(normX),
-        y: clamp01(normY),
-        score: point.score,
-      });
-    }
-  }
-
-  return result;
-}
-
-function rotatePoint(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  orientation: number,
-): { x: number; y: number } {
-  switch (orientation) {
-    case 0:
-      return { x, y };
-    case 90:
-      return { x: height - y, y: x };
-    case 180:
-      return { x: width - x, y: height - y };
-    case 270:
-      return { x: y, y: width - x };
-    default:
-      return { x, y };
-  }
-}
-
-function clamp01(value: number) {
-  return Math.max(0, Math.min(1, value));
+function fmtDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 function PoseOverlay({
@@ -383,4 +401,44 @@ const styles = StyleSheet.create({
   },
   btnText: { color: '#ffffff', fontWeight: '700' },
   btnTextDisabled: { color: '#ffffff60' },
+  modalWrap: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: '#111',
+    padding: 16,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    maxHeight: '70%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  modalTitle: { color: '#ffffff', fontSize: 18, fontWeight: '800' },
+  modalClose: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#222',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  historyRow: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f1f1f',
+  },
+  historyTime: { color: '#ffffff', fontWeight: '700' },
+  historySummary: { color: '#ffffff', opacity: 0.85, marginTop: 4 },
+  historyEmpty: {
+    color: '#ffffff',
+    opacity: 0.6,
+    textAlign: 'center',
+    paddingVertical: 16,
+  },
 });

@@ -12,6 +12,14 @@ import {
 } from '../pose/technique';
 import { say } from '../voice/tts';
 
+export type SessionSummary = {
+  reps: number;
+  avgForm: number;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+};
+
 export type SessionState = 'IDLE' | 'ACTIVE' | 'PAUSED';
 
 type Options = {
@@ -28,11 +36,15 @@ export function useSquatSession(
   const [elapsed, setElapsed] = useState(0);
 
   const sessionStartRef = useRef<number | null>(null);
+  const sessionBeginRef = useRef<number | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastRepStateRef = useRef<RepState>(initialRep.state);
   const lastRepCountRef = useRef(initialRep.count);
   const lastTechniqueCueAt = useRef(0);
   const valgusRef = useRef(makeValgusState());
+  const formSumRef = useRef(0);
+  const formSamplesRef = useRef(0);
+  const repRef = useRef(initialRep);
 
   useEffect(() => {
     if (timerRef.current) {
@@ -61,6 +73,12 @@ export function useSquatSession(
 
     setRep((prev) => {
       const next = updateSquatFSM(prev, keypoints);
+      repRef.current = next;
+
+      if (keypoints.length > 0) {
+        formSumRef.current += next.score;
+        formSamplesRef.current += 1;
+      }
 
       if (next.state !== lastRepStateRef.current) {
         if (next.state === 'BOTTOM') {
@@ -105,11 +123,16 @@ export function useSquatSession(
   }, [keypoints, session, cueCooldownMs]);
 
   const start = useCallback(() => {
+    const now = Date.now();
     setRep(initialRep);
+    repRef.current = initialRep;
     lastRepStateRef.current = initialRep.state;
     lastRepCountRef.current = initialRep.count;
     valgusRef.current = makeValgusState();
-    sessionStartRef.current = Date.now();
+    sessionStartRef.current = now;
+    sessionBeginRef.current = now;
+    formSumRef.current = 0;
+    formSamplesRef.current = 0;
     lastTechniqueCueAt.current = 0;
     setElapsed(0);
     onResetPoseStream?.();
@@ -131,18 +154,43 @@ export function useSquatSession(
     say('resumed');
   }, [elapsed]);
 
-  const reset = useCallback(() => {
-    setSession('IDLE');
-    setElapsed(0);
-    sessionStartRef.current = null;
-    valgusRef.current = makeValgusState();
-    lastRepStateRef.current = initialRep.state;
-    lastRepCountRef.current = initialRep.count;
-    lastTechniqueCueAt.current = 0;
-    onResetPoseStream?.();
-    setRep(initialRep);
-    say('reset');
-  }, [onResetPoseStream]);
+  const reset = useCallback(
+    (options: { speak?: boolean } = {}) => {
+      setSession('IDLE');
+      setElapsed(0);
+      sessionStartRef.current = null;
+      sessionBeginRef.current = null;
+      valgusRef.current = makeValgusState();
+      lastRepStateRef.current = initialRep.state;
+      lastRepCountRef.current = initialRep.count;
+      lastTechniqueCueAt.current = 0;
+      formSumRef.current = 0;
+      formSamplesRef.current = 0;
+      repRef.current = initialRep;
+      onResetPoseStream?.();
+      setRep(initialRep);
+      if (options.speak !== false) {
+        say('reset');
+      }
+    },
+    [onResetPoseStream],
+  );
+
+  const getSummary = useCallback((): SessionSummary => {
+    const endedAt = Date.now();
+    const startedAt = sessionBeginRef.current ?? endedAt;
+    const durationMs = Math.max(0, endedAt - startedAt);
+    const avgForm = formSamplesRef.current
+      ? Math.round(formSumRef.current / formSamplesRef.current)
+      : 0;
+    return {
+      reps: repRef.current.count,
+      avgForm,
+      startedAt,
+      endedAt,
+      durationMs,
+    };
+  }, []);
 
   return {
     session,
@@ -152,5 +200,6 @@ export function useSquatSession(
     pause,
     resume,
     reset,
+    getSummary,
   };
 }
