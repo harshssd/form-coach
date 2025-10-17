@@ -4,28 +4,36 @@ import React, {
   useState,
 } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  LayoutChangeEvent,
-  Pressable,
-  Modal,
   FlatList,
+  LayoutChangeEvent,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
+import Svg, { Circle, Rect, Text as SvgText } from 'react-native-svg';
 import { useFrameProcessor, VisionCameraProxy } from 'react-native-vision-camera';
 import { useRunOnJS } from 'react-native-worklets-core';
-import Svg, { Circle, Rect, Text as SvgText } from 'react-native-svg';
-import { KP } from '../pose/utils';
 import { PoseCamera } from '../camera/PoseCamera';
 import { useCameraSelection } from '../camera/useCameraSelection';
+import { poseRecorder } from '../devtools/poseRecorder';
 import {
   usePoseStream,
   type PoseFramePayload,
 } from '../pose/usePoseStream';
+import { KP } from '../pose/utils';
 import {
   useExerciseSession,
   type Exercise,
 } from '../reps/useExerciseSession';
+import {
+  currentStreak,
+  last7DaysSummary,
+  todayTotals,
+  weekTotals,
+  type DayBucket,
+} from '../storage/selectors';
 import {
   addSession,
   listSessions,
@@ -36,13 +44,7 @@ import {
   saveSettings,
   type ExerciseSettings,
 } from '../storage/settingsStore';
-import {
-  last7DaysSummary,
-  todayTotals,
-  weekTotals,
-  currentStreak,
-  type DayBucket,
-} from '../storage/selectors';
+import type { PosePacket } from '../types/recording';
 import { say } from '../voice/tts';
 
 type RawPoint = {
@@ -70,9 +72,14 @@ export default function CameraScreen() {
   const {
     keypoints,
     signals,
+    baseline,
     debug,
     handleFrame,
     reset: resetPoseStream,
+    setCalibrationActive,
+    resetCalibration,
+    calibrationWindowMs,
+    frameMeta,
   } = usePoseStream({
     viewWidth,
     viewHeight,
@@ -95,6 +102,12 @@ export default function CameraScreen() {
   const [settings, setSettings] = useState<ExerciseSettings>(() =>
     loadSettings('squat'),
   );
+  const [recording, setRecording] = useState(false);
+  const [lastRecordingPath, setLastRecordingPath] = useState<string | null>(
+    null,
+  );
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [runs, setRuns] = useState<{ id: string; path: string }[]>([]);
 
   const {
     session,
@@ -107,10 +120,13 @@ export default function CameraScreen() {
     getSummary,
     calibrating,
     calibrationProgress,
-  } = useExerciseSession(keypoints, {
+  } = useExerciseSession(keypoints, baseline, {
     exercise,
     settings,
     onResetPoseStream: resetPoseStream,
+    setCalibrationActive,
+    resetCalibration,
+    calibrationWindowMs,
   });
 
   useEffect(() => {
@@ -124,6 +140,30 @@ export default function CameraScreen() {
   }, [exercise]);
 
   const exercises: Exercise[] = ['squat', 'pushup'];
+
+  const toggleRecording = useCallback(async () => {
+    try {
+      if (!recording) {
+        const id = `run-${new Date()
+          .toISOString()
+          .replace(/[:.]/g, '-')}`;
+        await poseRecorder.start(id, exercise);
+        setLastRecordingPath(null);
+        setRecording(true);
+        console.log('[PoseRecorder] Recording started', id);
+      } else {
+        const saved = await poseRecorder.stopAndSave();
+        setRecording(false);
+        if (saved?.jsonPath) {
+          setLastRecordingPath(saved.jsonPath);
+          console.log('[PoseRecorder] Saved run', saved.jsonPath);
+        }
+      }
+    } catch (error) {
+      console.warn('[PoseRecorder] toggle failed', error);
+      setRecording(false);
+    }
+  }, [exercise, recording]);
 
   const pushFrame = useRunOnJS(
     (payload: PoseFramePayload | null) => {
@@ -142,6 +182,87 @@ export default function CameraScreen() {
       `exercise=${exercise}`,
     );
   }, [hasPermission, device, keypoints.length, session, exercise]);
+
+  const openRuns = useCallback(async () => {
+    try {
+      const list = await poseRecorder.listRuns();
+      setRuns(list.slice().reverse());
+      setRunsOpen(true);
+    } catch (error) {
+      console.warn('[PoseRecorder] listRuns failed', error);
+    }
+  }, []);
+
+  const closeRuns = useCallback(() => {
+    setRunsOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!recording) {
+      return;
+    }
+    if (keypoints.length === 0) {
+      return;
+    }
+
+    const recordedKps = keypoints
+      .filter((kp): kp is KP & { name: string } => Boolean(kp.name))
+      .map((kp) => ({
+        name: kp.name as string,
+        x: kp.x,
+        y: kp.y,
+        c: kp.score ?? 1,
+      }));
+
+    if (recordedKps.length === 0) {
+      return;
+    }
+
+    const sig: PosePacket['sig'] = {};
+    const assign = <K extends keyof PosePacket['sig']>(
+      key: K,
+      value: number,
+    ) => {
+      if (Number.isFinite(value)) {
+        sig[key] = value;
+      }
+    };
+
+    assign('squatDepth', signals.squatDepth);
+    assign('kneeFlex', signals.kneeFlex);
+    assign('valgus', signals.valgus);
+    assign('elbowFlex', signals.elbowFlex);
+    assign('plankStraight', signals.plankStraight);
+
+    poseRecorder.push({
+      exercise,
+      camera: {
+        front: cameraPosition === 'front',
+        mirror: frameMeta.mirror,
+        orientation: frameMeta.orientation,
+      },
+      kps: recordedKps,
+      sig,
+      fsm: {
+        state: (rep as typeof rep & { state?: string }).state ?? session,
+        repCount: rep.count ?? 0,
+      },
+    });
+  }, [
+    cameraPosition,
+    exercise,
+    frameMeta.mirror,
+    frameMeta.orientation,
+    keypoints,
+    recording,
+    rep,
+    session,
+    signals.elbowFlex,
+    signals.kneeFlex,
+    signals.plankStraight,
+    signals.squatDepth,
+    signals.valgus,
+  ]);
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -208,9 +329,21 @@ export default function CameraScreen() {
 
   const nextCameraPosition = cameraPosition === 'back' ? 'front' : 'back';
   const canSwitchCamera = availablePositions[nextCameraPosition];
-  const calibrationPercent = Math.round(
-    Math.max(0, Math.min(1, calibrationProgress)) * 100,
+  const calibrationProgressClamped = Math.max(
+    0,
+    Math.min(1, calibrationProgress),
   );
+  const calibrationPercent = Math.round(calibrationProgressClamped * 100);
+  const baselineReady = baseline.ready || baseline.hipWidth > 0.05;
+  const baselineHipText =
+    baseline.hipWidth > 0 ? baseline.hipWidth.toFixed(3) : '0.000';
+  const baselineKneeNorm =
+    baseline.hipWidth > 0 && baseline.kneeWidth > 0
+      ? (baseline.kneeWidth / baseline.hipWidth).toFixed(2)
+      : '--';
+  const baselineTiltText = Number.isFinite(baseline.torsoTilt)
+    ? baseline.torsoTilt.toFixed(1)
+    : '0.0';
 
   const endAndSave = useCallback(() => {
     if (session !== 'PAUSED') {
@@ -311,6 +444,15 @@ export default function CameraScreen() {
 
       <View style={styles.overlay}>
         <Text style={styles.overlayText}>POSE: {keypoints.length} pts</Text>
+        <Text style={styles.overlayMeta}>
+          CAL: {baselineReady ? 'ready' : `${calibrationPercent}%`} • hip {baselineHipText} • knee/hip {baselineKneeNorm} • tilt {baselineTiltText}°
+        </Text>
+        {recording ? <Text style={styles.overlayRec}>REC</Text> : null}
+        {lastRecordingPath ? (
+          <Text style={styles.overlayPath}>
+            last: {lastRecordingPath.split('/').pop()}
+          </Text>
+        ) : null}
         {debug ? <Text style={styles.debugText}>{debug}</Text> : null}
       </View>
 
@@ -377,6 +519,15 @@ export default function CameraScreen() {
 
           <View style={[styles.controlRow, styles.controlRowSecondary]}>
             <View style={styles.controlCell}>
+              <Btn
+                label={recording ? 'Stop Rec' : 'Start Rec'}
+                onPress={toggleRecording}
+              />
+            </View>
+            <View style={styles.controlCell}>
+              <Btn label="Recordings" onPress={openRuns} />
+            </View>
+            <View style={styles.controlCell}>
               <Btn label="History" onPress={openHistory} />
             </View>
             <View style={styles.controlCell}>
@@ -442,6 +593,38 @@ export default function CameraScreen() {
                 <Text style={styles.historyEmpty}>No sessions yet.</Text>
               }
             />
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={runsOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={closeRuns}
+      >
+        <View style={styles.modalWrap}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Recordings</Text>
+              <Pressable style={styles.modalClose} onPress={closeRuns}>
+                <Text style={styles.btnText}>Close</Text>
+              </Pressable>
+            </View>
+            {runs.length === 0 ? (
+              <Text style={styles.historyEmpty}>No recordings saved yet.</Text>
+            ) : (
+              <FlatList
+                data={runs}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => (
+                  <View style={styles.runRow}>
+                    <Text style={styles.runTitle}>{item.id}</Text>
+                    <Text style={styles.runPath}>{item.path}</Text>
+                  </View>
+                )}
+              />
+            )}
           </View>
         </View>
       </Modal>
@@ -817,6 +1000,18 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   overlayText: { color: '#ffffff', fontWeight: '600', letterSpacing: 1 },
+  overlayMeta: { color: '#ffffffcc', fontSize: 12, marginTop: 2 },
+  overlayRec: {
+    color: '#FF4D4F',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  overlayPath: {
+    color: '#ffffff88',
+    fontSize: 10,
+    marginTop: 2,
+  },
   debugText: { color: '#ffffff', marginTop: 4, fontSize: 12 },
   calibrationOverlay: {
     position: 'absolute',
@@ -963,6 +1158,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 16,
   },
+  runRow: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f1f1f',
+  },
+  runTitle: { color: '#ffffff', fontWeight: '700' },
+  runPath: { color: '#ffffff88', marginTop: 4, fontSize: 12 },
   legendRow: {
     flexDirection: 'row',
     justifyContent: 'center',

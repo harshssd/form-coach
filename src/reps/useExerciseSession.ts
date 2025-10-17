@@ -11,16 +11,8 @@ import {
   updatePushupFSM,
   type RepUpdate as PushupRepUpdate,
 } from './pushupCounter';
-import {
-  DEFAULT_CALIBRATION_MS,
-  DEFAULT_MIN_STANCE_WIDTH,
-  computeValgus,
-  finalizeStanceCalib,
-  startStanceCalib,
-  updateStanceCalib,
-  type StanceBaseline,
-  type StanceCalib,
-} from '../pose/technique';
+import { DEFAULT_VALGUS_RULE, evaluateValgus } from '../pose/technique';
+import type { Baseline } from '../pose/calibration';
 import type { ExerciseSettings } from '../storage/settingsStore';
 import { say } from '../voice/tts';
 
@@ -42,6 +34,9 @@ type Options = {
   settings: ExerciseSettings;
   onResetPoseStream?: () => void;
   cueCooldownMs?: number;
+  setCalibrationActive?: (active: boolean) => void;
+  resetCalibration?: () => void;
+  calibrationWindowMs?: number;
 };
 
 const cloneInitial = (exercise: Exercise): AnyRepUpdate =>
@@ -49,7 +44,16 @@ const cloneInitial = (exercise: Exercise): AnyRepUpdate =>
 
 export function useExerciseSession(
   keypoints: KP[],
-  { exercise, settings, onResetPoseStream, cueCooldownMs = 1200 }: Options,
+  baseline: Baseline,
+  {
+    exercise,
+    settings,
+    onResetPoseStream,
+    cueCooldownMs = 1200,
+    setCalibrationActive,
+    resetCalibration,
+    calibrationWindowMs = 2000,
+  }: Options,
 ) {
   const [session, setSession] = useState<SessionState>('IDLE');
   const [rep, setRep] = useState<AnyRepUpdate>(cloneInitial(exercise));
@@ -57,7 +61,7 @@ export function useExerciseSession(
 
   const sessionStartRef = useRef<number | null>(null);
   const sessionBeginRef = useRef<number | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastRepStateRef = useRef<SquatRepState>('TOP');
   const lastRepCountRef = useRef(0);
   const lastTechniqueCueAt = useRef(0);
@@ -69,9 +73,9 @@ export function useExerciseSession(
     kneesCueFired: false,
   });
   const valgusHoldRef = useRef<number | null>(null);
-  const stanceBaselineRef = useRef<StanceBaseline | null>(null);
-  const calibrationRef = useRef<StanceCalib | null>(null);
-  const [stanceBaseline, setStanceBaseline] = useState<StanceBaseline | null>(
+  const valgusBelowRef = useRef(false);
+  const calibrationStartRef = useRef<number | null>(null);
+  const calibrationTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
   const [calibrationProgress, setCalibrationProgress] = useState(0);
@@ -114,45 +118,70 @@ export function useExerciseSession(
     };
   }, [session]);
 
+  const baselineHasShape =
+    baseline.hipWidth != null && baseline.hipWidth > 0;
+  const baselineReady =
+    baseline.ready || (baseline.hipWidth != null && baseline.hipWidth > 0.05);
+
   useEffect(() => {
     if (session !== 'CALIBRATING' || exerciseRef.current !== 'squat') {
       return;
     }
 
-    const calibration = calibrationRef.current;
-    if (!calibration) {
-      return;
-    }
+    const calibrationDone =
+      baselineReady || calibrationProgress >= 0.99;
 
-    const updated = updateStanceCalib(calibration, keypoints);
-    calibrationRef.current = updated;
-
-    const elapsedMs = Date.now() - updated.startedAt;
-    const progress = Math.max(
-      0,
-      Math.min(1, elapsedMs / updated.durationMs),
-    );
-    setCalibrationProgress(progress);
-
-    if (elapsedMs >= updated.durationMs) {
-      const baseline = finalizeStanceCalib(updated, {
-        minStanceWidth: DEFAULT_MIN_STANCE_WIDTH,
-      });
-      stanceBaselineRef.current = baseline;
-      setStanceBaseline(baseline);
-      calibrationRef.current = null;
+    if (calibrationDone) {
       setCalibrationProgress(1);
+      calibrationStartRef.current = null;
+      if (calibrationTimerRef.current) {
+        clearInterval(calibrationTimerRef.current);
+        calibrationTimerRef.current = null;
+      }
+      setCalibrationActive?.(false);
       sessionStartRef.current = Date.now();
       setElapsed(0);
       setSession('ACTIVE');
-      if (baseline) {
-        speak('stance calibrated');
+      if (baselineReady) {
+        speak('stance calibrated', 400);
       }
       speak('session started');
+      return;
     }
+
+    if (calibrationStartRef.current == null) {
+      calibrationStartRef.current = Date.now();
+    }
+
+    if (!calibrationTimerRef.current) {
+      calibrationTimerRef.current = setInterval(() => {
+        if (calibrationStartRef.current == null) {
+          return;
+        }
+        const progress = Math.max(
+          0,
+          Math.min(
+            1,
+            (Date.now() - calibrationStartRef.current) / calibrationWindowMs,
+          ),
+        );
+        setCalibrationProgress(progress);
+      }, 100);
+    }
+
+    return () => {
+      if (calibrationTimerRef.current) {
+        clearInterval(calibrationTimerRef.current);
+        calibrationTimerRef.current = null;
+      }
+    };
   }, [
-    keypoints,
+    baselineHasShape,
+    baselineReady,
+    calibrationProgress,
+    calibrationWindowMs,
     session,
+    setCalibrationActive,
     speak,
   ]);
 
@@ -160,6 +189,8 @@ export function useExerciseSession(
     if (session !== 'ACTIVE') {
       return;
     }
+
+    const valgusRule = settings.valgus ?? DEFAULT_VALGUS_RULE;
 
     setRep((prev) => {
       const next =
@@ -181,6 +212,7 @@ export function useExerciseSession(
         if (next.state === 'TOP') {
           repContextRef.current.kneesCueFired = false;
           valgusHoldRef.current = null;
+          valgusBelowRef.current = false;
           if (next.count > lastRepCountRef.current) {
             speak('up', 400);
           }
@@ -195,38 +227,48 @@ export function useExerciseSession(
         lastRepCountRef.current = next.count;
         repContextRef.current.kneesCueFired = false;
         valgusHoldRef.current = null;
+        valgusBelowRef.current = false;
       }
 
       const now = Date.now();
       const inCritical =
         next.state === 'DESCENDING' || next.state === 'BOTTOM';
 
-      if (
-        settings.enableTechniqueCues &&
-        exerciseRef.current === 'squat'
-      ) {
-        const snapshot = computeValgus(keypoints, stanceBaselineRef.current, {
-          minStanceWidth: DEFAULT_MIN_STANCE_WIDTH,
-        });
+        if (
+          settings.enableTechniqueCues &&
+          exerciseRef.current === 'squat'
+        ) {
+        const sample = evaluateValgus(keypoints, baseline, valgusRule);
+        const confident = sample?.confident ?? false;
+        const minFlex =
+          sample != null
+            ? Math.min(sample.flexLeft, sample.flexRight)
+            : null;
+        const flexOk =
+          minFlex != null &&
+          minFlex >= valgusRule.minFlexDeg &&
+          minFlex <= valgusRule.maxFlexDeg;
+        const belowThreshold =
+          sample != null &&
+          sample.kneeSepNorm < valgusRule.kneeSepMin;
+        const clearThreshold =
+          sample != null &&
+          sample.kneeSepNorm > valgusRule.kneeSepClear;
 
-        const hasFlex =
-          snapshot != null &&
-          Math.max(snapshot.flexLeft, snapshot.flexRight) > 30;
-
-        if (!inCritical || !hasFlex || !snapshot) {
-          valgusHoldRef.current = null;
-        } else {
-          const peakValgus = Math.max(
-            snapshot.relLeft,
-            snapshot.relRight,
-          );
-          if (peakValgus >= 0.06) {
+        if (
+          baselineReady &&
+          inCritical &&
+          confident &&
+          flexOk
+        ) {
+          if (belowThreshold) {
             if (!valgusHoldRef.current) {
               valgusHoldRef.current = now;
             }
+            valgusBelowRef.current = true;
             const heldLongEnough =
               valgusHoldRef.current != null &&
-              now - valgusHoldRef.current >= 300;
+              now - valgusHoldRef.current >= valgusRule.persistMs;
             if (
               heldLongEnough &&
               !repContextRef.current.kneesCueFired &&
@@ -236,9 +278,15 @@ export function useExerciseSession(
               lastTechniqueCueAt.current = now;
               repContextRef.current.kneesCueFired = true;
             }
-          } else {
+          } else if (clearThreshold) {
+            valgusHoldRef.current = null;
+            valgusBelowRef.current = false;
+          } else if (!valgusBelowRef.current) {
             valgusHoldRef.current = null;
           }
+        } else {
+          valgusHoldRef.current = null;
+          valgusBelowRef.current = false;
         }
       } else if (
         settings.enableTechniqueCues &&
@@ -253,7 +301,7 @@ export function useExerciseSession(
 
       return next;
     });
-  }, [keypoints, session, cueCooldownMs, settings.depthThreshold, settings.enableTechniqueCues, settings.enableVoice, speak]);
+  }, [baseline, baselineReady, keypoints, session, cueCooldownMs, settings.depthThreshold, settings.enableTechniqueCues, settings.enableVoice, settings.valgus, speak]);
 
   const resetInternal = useCallback(
     (speakOut = true) => {
@@ -266,9 +314,14 @@ export function useExerciseSession(
       lastTechniqueCueAt.current = 0;
       repContextRef.current = { kneesCueFired: false };
       valgusHoldRef.current = null;
-      stanceBaselineRef.current = null;
-      setStanceBaseline(null);
-      calibrationRef.current = null;
+      valgusBelowRef.current = false;
+      calibrationStartRef.current = null;
+      if (calibrationTimerRef.current) {
+        clearInterval(calibrationTimerRef.current);
+        calibrationTimerRef.current = null;
+      }
+      resetCalibration?.();
+      setCalibrationActive?.(false);
       setCalibrationProgress(0);
       formSumRef.current = 0;
       formSamplesRef.current = 0;
@@ -280,7 +333,7 @@ export function useExerciseSession(
         speak('reset');
       }
     },
-    [onResetPoseStream, speak],
+    [onResetPoseStream, resetCalibration, setCalibrationActive, speak],
   );
 
   const start = useCallback(() => {
@@ -296,28 +349,29 @@ export function useExerciseSession(
     lastTechniqueCueAt.current = 0;
     repContextRef.current = { kneesCueFired: false };
     valgusHoldRef.current = null;
-    stanceBaselineRef.current = null;
-    setStanceBaseline(null);
-    calibrationRef.current = null;
+    valgusBelowRef.current = false;
     setCalibrationProgress(0);
     setElapsed(0);
     onResetPoseStream?.();
     sessionStartRef.current = null;
     if (exerciseRef.current === 'squat') {
-      const calibration = startStanceCalib(
-        DEFAULT_CALIBRATION_MS,
-        now,
-      );
-      calibrationRef.current = calibration;
+      calibrationStartRef.current = now;
+      if (calibrationTimerRef.current) {
+        clearInterval(calibrationTimerRef.current);
+        calibrationTimerRef.current = null;
+      }
+      resetCalibration?.();
+      setCalibrationActive?.(true);
       setCalibrationProgress(0);
       setSession('CALIBRATING');
       speak('hold still to calibrate stance');
     } else {
+      setCalibrationActive?.(false);
       sessionStartRef.current = now;
       setSession('ACTIVE');
       speak('session started');
     }
-  }, [onResetPoseStream, speak]);
+  }, [onResetPoseStream, resetCalibration, setCalibrationActive, speak]);
 
   const pause = useCallback(() => {
     if (sessionStartRef.current != null) {
@@ -365,7 +419,6 @@ export function useExerciseSession(
     resume,
     reset,
     getSummary,
-    stanceBaseline,
     calibrating: session === 'CALIBRATING',
     calibrationProgress,
   };

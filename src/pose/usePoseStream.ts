@@ -5,6 +5,11 @@ import {
   type SmoothedKeypoint,
   type RawKeypoint,
 } from './smoothing';
+import {
+  EMPTY_BASELINE,
+  makeCalibrator,
+  type Baseline,
+} from './calibration';
 
 export type PoseFramePayload = {
   width: number;
@@ -36,21 +41,69 @@ const ZERO_SIGNALS: CanonicalSignals = {
   plankStraight: 0,
 };
 
+type FrameMeta = {
+  orientation: 'portrait' | 'landscape';
+  orientationValue: number;
+  mirror: boolean;
+};
+
+export const nowMono = () => Date.now();
+
 export function usePoseStream({
   viewWidth,
   viewHeight,
   displayMirrored,
 }: PoseStreamOptions) {
   const smootherRef = useRef(new KPSmoother());
+  const calibratorRef = useRef(makeCalibrator(2000));
+  const calibrationActiveRef = useRef(false);
+  const lastKneeFlexRef = useRef<number | null>(null);
+  const baselineRef = useRef<Baseline>(EMPTY_BASELINE);
   const [keypoints, setKeypoints] = useState<KP[]>([]);
   const [signals, setSignals] = useState<CanonicalSignals>(ZERO_SIGNALS);
   const [debug, setDebug] = useState<string | null>(null);
+  const [baseline, setBaseline] = useState<Baseline>(EMPTY_BASELINE);
+  const [frameMeta, setFrameMeta] = useState<FrameMeta>({
+    orientation: 'portrait',
+    orientationValue: 0,
+    mirror: false,
+  });
 
   const reset = useCallback(() => {
     smootherRef.current.reset();
+    calibratorRef.current.reset();
+    calibrationActiveRef.current = false;
+    lastKneeFlexRef.current = null;
+    baselineRef.current = { ...EMPTY_BASELINE };
+    setBaseline(EMPTY_BASELINE);
     setKeypoints([]);
     setSignals(ZERO_SIGNALS);
     setDebug(null);
+    setFrameMeta({
+      orientation: 'portrait',
+      orientationValue: 0,
+      mirror: false,
+    });
+  }, []);
+
+  const setCalibrationActive = useCallback(
+    (active: boolean, options: { reset?: boolean } = {}) => {
+      calibrationActiveRef.current = active;
+      if (active && options.reset !== false) {
+        calibratorRef.current.reset();
+        baselineRef.current = { ...EMPTY_BASELINE };
+        setBaseline(EMPTY_BASELINE);
+        lastKneeFlexRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const resetCalibration = useCallback(() => {
+    calibratorRef.current.reset();
+    baselineRef.current = { ...EMPTY_BASELINE };
+    setBaseline(EMPTY_BASELINE);
+    lastKneeFlexRef.current = null;
   }, []);
 
   const handleFrame = useCallback(
@@ -87,22 +140,125 @@ export function usePoseStream({
         score: kp.c,
       }));
 
+      const signalsNext = computeSignals(smoothed);
+      let baselineSnapshot = baselineRef.current;
+
+      if (calibrationActiveRef.current) {
+        const lastFlex = lastKneeFlexRef.current;
+        const deltaFlex =
+          lastFlex == null
+            ? 0
+            : Math.abs(lastFlex - signalsNext.kneeFlex);
+        if (deltaFlex < 12) {
+          const sample = createCalibrationSample(smoothed, Date.now());
+          if (sample) {
+            baselineSnapshot = calibratorRef.current.step(sample);
+            baselineRef.current = baselineSnapshot;
+            setBaseline(baselineSnapshot);
+          }
+        }
+      }
+
+      lastKneeFlexRef.current = signalsNext.kneeFlex;
+
+      const mirror = getMirrorFlag(
+        payload.orientation,
+        payload.isMirrored,
+        displayMirrored,
+      );
+      const orientationValue = normalizeOrientation(payload.orientation);
+      setFrameMeta({
+        mirror,
+        orientation:
+          orientationValue % 180 === 0 ? 'portrait' : 'landscape',
+        orientationValue,
+      });
+
       setKeypoints(smoothKP);
-      setSignals(computeSignals(smoothed));
+      setSignals(signalsNext);
       setDebug(
-        `pts:${smoothKP.length} w:${payload.width} h:${payload.height} orient:${payload.orientation} mirrored:${payload.isMirrored}`,
+        `pts:${smoothKP.length} w:${payload.width} h:${payload.height} orient:${payload.orientation} mirrored:${payload.isMirrored} cal:${
+          baselineSnapshot.ready ? 'ready' : 'collect'
+        } hip:${baselineSnapshot.hipWidth.toFixed(3)}`,
       );
     },
     [viewWidth, viewHeight, displayMirrored],
   );
 
+  const calibrationWindowMs = calibratorRef.current.windowMs;
+
   return {
     keypoints,
     signals,
+    baseline,
     debug,
     handleFrame,
     reset,
+    setCalibrationActive,
+    resetCalibration,
+    calibrationWindowMs,
+    frameMeta,
   };
+}
+
+function createCalibrationSample(
+  points: SmoothedKeypoint[],
+  ts: number,
+) {
+  const map: Record<string, SmoothedKeypoint | undefined> = {};
+  for (const kp of points) {
+    map[kp.name] = kp;
+  }
+
+  const leftHip = map['leftHip'];
+  const rightHip = map['rightHip'];
+  const leftKnee = map['leftKnee'];
+  const rightKnee = map['rightKnee'];
+  const leftShoulder =
+    map['leftShoulder'] ?? map['rightShoulder'] ?? leftHip ?? rightHip;
+  const rightShoulder =
+    map['rightShoulder'] ?? map['leftShoulder'] ?? rightHip ?? leftHip;
+
+  if (
+    !leftHip ||
+    !rightHip ||
+    !leftKnee ||
+    !rightKnee ||
+    !leftShoulder ||
+    !rightShoulder
+  ) {
+    return null;
+  }
+
+  return {
+    ts,
+    leftHip: toPointSample(leftHip),
+    rightHip: toPointSample(rightHip),
+    leftKnee: toPointSample(leftKnee),
+    rightKnee: toPointSample(rightKnee),
+    leftShoulder: toPointSample(leftShoulder),
+    rightShoulder: toPointSample(rightShoulder),
+  };
+}
+
+function toPointSample(point: SmoothedKeypoint) {
+  return {
+    x: point.x,
+    y: point.y,
+    c: point.c,
+  };
+}
+
+function normalizeOrientation(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function getMirrorFlag(
+  _orientation: number,
+  frameMirrored: boolean,
+  displayMirrored: boolean,
+) {
+  return displayMirrored ? !frameMirrored : frameMirrored;
 }
 
 function transformPosePoints(

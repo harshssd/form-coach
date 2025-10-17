@@ -1,153 +1,43 @@
+import type { Baseline } from './calibration';
 import type { KP } from './utils';
 import { angleDeg, byName } from './utils';
 
-const dist = (a: KP, b: KP) => Math.hypot(a.x - b.x, a.y - b.y);
-const MIN_CONFIDENCE = 0.5;
-
-export const DEFAULT_MIN_STANCE_WIDTH = 0.06;
-export const DEFAULT_CALIBRATION_MS = 2000;
-
-export type StanceBaseline = {
-  leftMedial: number;
-  rightMedial: number;
-  stanceWidth: number;
+export type ValgusRule = {
+  kneeSepMin: number;
+  kneeSepClear: number;
+  persistMs: number;
+  minFlexDeg: number;
+  maxFlexDeg: number;
+  minConf: number;
 };
 
-export type StanceCalib = {
-  startedAt: number;
-  durationMs: number;
-  totalSamples: number;
-  goodSamples: number;
-  sumLeftMedial: number;
-  sumRightMedial: number;
-  sumStanceWidth: number;
+export const DEFAULT_VALGUS_RULE: ValgusRule = {
+  kneeSepMin: 0.85,
+  kneeSepClear: 0.88,
+  persistMs: 300,
+  minFlexDeg: 20,
+  maxFlexDeg: 110,
+  minConf: 0.6,
 };
 
-export type ValgusSnapshot = {
-  relLeft: number;
-  relRight: number;
+export type ValgusSample = {
+  kneeSep: number;
+  hipWidth: number;
+  kneeSepNorm: number;
   flexLeft: number;
   flexRight: number;
-  stanceWidth: number;
-  rawLeft: number;
-  rawRight: number;
+  confident: boolean;
 };
 
-type LegMeasurements = {
-  leftMedial: number;
-  rightMedial: number;
-  stanceWidth: number;
-  leftFlex: number;
-  rightFlex: number;
-};
-
-export function startStanceCalib(
-  durationMs = DEFAULT_CALIBRATION_MS,
-  now = Date.now(),
-): StanceCalib {
-  return {
-    startedAt: now,
-    durationMs,
-    totalSamples: 0,
-    goodSamples: 0,
-    sumLeftMedial: 0,
-    sumRightMedial: 0,
-    sumStanceWidth: 0,
-  };
-}
-
-export function updateStanceCalib(
-  calib: StanceCalib,
+export function evaluateValgus(
   keypoints: KP[],
-): StanceCalib {
-  const next = {
-    ...calib,
-    totalSamples: calib.totalSamples + 1,
-  };
-
-  const measurements = measureLegs(keypoints);
-  if (!measurements) {
-    return next;
-  }
-
-  return {
-    ...next,
-    goodSamples: next.goodSamples + 1,
-    sumLeftMedial: next.sumLeftMedial + measurements.leftMedial,
-    sumRightMedial: next.sumRightMedial + measurements.rightMedial,
-    sumStanceWidth: next.sumStanceWidth + measurements.stanceWidth,
-  };
-}
-
-export function finalizeStanceCalib(
-  calib: StanceCalib,
-  {
-    minGoodSamples = 20,
-    minStanceWidth = DEFAULT_MIN_STANCE_WIDTH,
-  }: { minGoodSamples?: number; minStanceWidth?: number } = {},
-): StanceBaseline | null {
-  if (calib.goodSamples < minGoodSamples) {
+  baseline: Baseline | null,
+  rule: ValgusRule = DEFAULT_VALGUS_RULE,
+): ValgusSample | null {
+  if (!baseline || !baseline.ready || baseline.hipWidth <= 0) {
     return null;
   }
 
-  const leftMedial = calib.sumLeftMedial / calib.goodSamples;
-  const rightMedial = calib.sumRightMedial / calib.goodSamples;
-  const stanceWidth = calib.sumStanceWidth / calib.goodSamples;
-
-  if (
-    !Number.isFinite(leftMedial) ||
-    !Number.isFinite(rightMedial) ||
-    !Number.isFinite(stanceWidth) ||
-    stanceWidth < minStanceWidth
-  ) {
-    return null;
-  }
-
-  return {
-    leftMedial,
-    rightMedial,
-    stanceWidth,
-  };
-}
-
-export function computeValgus(
-  keypoints: KP[],
-  baseline: StanceBaseline | null,
-  {
-    minStanceWidth = DEFAULT_MIN_STANCE_WIDTH,
-  }: { minStanceWidth?: number } = {},
-): ValgusSnapshot | null {
-  if (!baseline) {
-    return null;
-  }
-
-  const measurements = measureLegs(keypoints);
-  if (!measurements) {
-    return null;
-  }
-
-  if (
-    baseline.stanceWidth < minStanceWidth ||
-    measurements.stanceWidth < minStanceWidth * 0.65
-  ) {
-    return null;
-  }
-
-  const relLeft = Math.max(0, measurements.leftMedial - baseline.leftMedial);
-  const relRight = Math.max(0, measurements.rightMedial - baseline.rightMedial);
-
-  return {
-    relLeft,
-    relRight,
-    flexLeft: measurements.leftFlex,
-    flexRight: measurements.rightFlex,
-    stanceWidth: measurements.stanceWidth,
-    rawLeft: measurements.leftMedial,
-    rawRight: measurements.rightMedial,
-  };
-}
-
-function measureLegs(keypoints: KP[]): LegMeasurements | null {
   const map = byName(keypoints);
   const lh = map['leftHip'];
   const rh = map['rightHip'];
@@ -160,41 +50,27 @@ function measureLegs(keypoints: KP[]): LegMeasurements | null {
     return null;
   }
 
-  const pts = [lh, rh, lk, rk, la, ra];
-  if (pts.some((p) => p.score != null && p.score < MIN_CONFIDENCE)) {
+  const confidences = [lh, rh, lk, rk, la, ra].map((kp) =>
+    kp.score != null ? kp.score : 1,
+  );
+  const confident = confidences.every((c) => c >= rule.minConf);
+
+  const hipWidth = Math.hypot(lh.x - rh.x, lh.y - rh.y);
+  const kneeWidth = Math.hypot(lk.x - rk.x, lk.y - rk.y);
+
+  if (!hipWidth || !Number.isFinite(kneeWidth)) {
     return null;
   }
-
-  const pelvis = dist(lh, rh);
-  if (!pelvis || pelvis < 1e-3) {
-    return null;
-  }
-
-  const axisX = (rh.x - lh.x) / pelvis;
-  const axisY = (rh.y - lh.y) / pelvis;
-
-  const project = (dx: number, dy: number) => dx * axisX + dy * axisY;
-
-  const leftMedial = Math.max(
-    0,
-    project(lk.x - la.x, lk.y - la.y) / pelvis,
-  );
-  const rightMedial = Math.max(
-    0,
-    project(ra.x - rk.x, ra.y - rk.y) / pelvis,
-  );
-
-  const stanceWidth =
-    Math.abs(project(ra.x - la.x, ra.y - la.y)) / pelvis;
 
   const leftFlex = Math.max(0, 180 - angleDeg(lh, lk, la));
   const rightFlex = Math.max(0, 180 - angleDeg(rh, rk, ra));
 
   return {
-    leftMedial,
-    rightMedial,
-    stanceWidth,
-    leftFlex,
-    rightFlex,
+    kneeSep: kneeWidth,
+    hipWidth,
+    kneeSepNorm: kneeWidth / Math.max(baseline.hipWidth, 1e-4),
+    flexLeft: leftFlex,
+    flexRight: rightFlex,
+    confident,
   };
 }
