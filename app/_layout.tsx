@@ -15,7 +15,7 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
 
   useEffect(() => {
-    initAnalytics();
+    void initAnalytics();
   }, []);
 
   return (
